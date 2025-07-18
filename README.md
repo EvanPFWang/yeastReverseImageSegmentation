@@ -20,6 +20,10 @@ d1, [a1,b1], [n1, m1]
  n2, m2
 
 
+LoRA
+
+ansys fluid and rhino
+
 
 https://github.com/rahi-lab/YeaZ-GUI/blob/master/readme.md
 
