@@ -32,8 +32,9 @@ https://bmcbiol.biomedcentral.com/articles/10.1186/s12915-022-01372-6?utm_source
 https://github.com/ymzayek/yeastcells-detection-maskrcnn?utm_source=chatgpt.com
 
 EvanPFWangcolab
-https://colab.research.google.com/github/ymzayek/yeastcells-detection-maskrcnn/blob/master/notebooks/create_synthetic_dataset_for_training.ipynb#scrollTo=MACot9bXHCXx
 
+https://colab.research.google.com/github/ymzayek/yeastcells-detection-maskrcnn/blob/master/notebooks/create_synthetic_dataset_for_training.ipynb#scrollTo=MACot9bXHCXx
+https://colab.research.google.com/github/ymzayek/yeastcells-detection-maskrcnn/blob/master/notebooks/train_mask_rcnn_network.ipynb
 
 
 https://github.com/ymzayek/yeastcells-detection-maskrcnn/blob/main/notebooks/example_pipeline.ipynb
