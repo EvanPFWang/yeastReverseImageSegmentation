@@ -1,11 +1,16 @@
 import imageio
+import time
+import imageio.v2 as imageio  #imageio‑v3 friendly import
 import numpy as np
+
 from skimage.draw import ellipse
 import os
 import cv2
-import time
+
 import math
 print("Done Importing")
+
+
 
 notebook_directory = os.getcwd()
 
@@ -29,11 +34,11 @@ print(f"Notebook directory: {notebook_directory}")
     #denom = (a_hat * a_hat) * (b_hat * b_hat)
     #delta  = diff / denom if abs(diff) > _DOUBLE_TINY else 0.0
 
-# the product underflows for the diff and denom  underflow to float32 subnormal
-# also reciprical- squares can exceed normal range
-# rounding noise may accumulate past 7 decimal places
-_DOUBLE_EPS  = np.finfo(np.float64).eps     # ≈ 2.22e‑16
-_DOUBLE_TINY = np.finfo(np.float64).tiny    # ≈ 2.23e‑308
+#the product underflows for the diff and denom  underflow to float32 subnormal
+#also reciprical- squares can exceed normal range
+#rounding noise may accumulate past 7 decimal places
+_DOUBLE_EPS  = np.finfo(np.float64).eps     #≈ 2.22e‑16
+_DOUBLE_TINY = np.finfo(np.float64).tiny    #≈ 2.23e‑308
 
 
 
@@ -74,12 +79,12 @@ def ellipse_params_to_general_form(center_x: float,
         r      = np.float64(0.5) * (semi_a + semi_b)
         inv_r2 = np.float64(1.0) / (r * r)
         return {
-            "a": inv_r2,  # A
-            "b": inv_r2,  # C (equal for a circle)
-            "c": np.float64(0.0),  # B
+            "a": inv_r2,  #A
+            "b": inv_r2,  #C (equal for a circle)
+            "c": np.float64(0.0),  #B
             "d": np.float64(1.0),
             "h": center_x,
-            "k": center_y,
+            "w": center_y,
         }
 
     scale  = np.float64(max(semi_a, semi_b))
@@ -91,7 +96,7 @@ def ellipse_params_to_general_form(center_x: float,
 
     #c_coeff = 2 * sin_t * cos_t * (1/semi_a**2 - 1/semi_b**2)
     #init used this one but there is cancellation error in the parentheses so i made
-    # delta, inv1 and inv2 for numerical stabilityinv_a2 = 1.0 / (a*a)
+    #delta, inv1 and inv2 for numerical stabilityinv_a2 = 1.0 / (a*a)
     #delta used later
 
     theta = np.deg2rad(angle_deg % 360)
@@ -101,18 +106,18 @@ def ellipse_params_to_general_form(center_x: float,
     sin_t  = math.sin(theta)
     cos_t  = math.cos(theta)
 
-    # ------------------------------------------------------------------
-    # 3Stable product for Δ = 1/a² − 1/b²  (avoids catastrophic cancellation)
-    #     Δ = (b_hat − a_hat)(b_hat + a_hat) / (a_hat² b_hat²)
-    #     Underflow safeguard: if Δ under‑flows to zero at float64, we can
-    #     safely snap B to zero – numerically, the ellipse is essentially
-    #     axis‑aligned.
+    #------------------------------------------------------------------
+    #3Stable product for Δ = 1/a² − 1/b²  (avoids catastrophic cancellation)
+    #   Δ = (b_hat − a_hat)(b_hat + a_hat) / (a_hat² b_hat²)
+    #   Underflow safeguard: if Δ under‑flows to zero at float64, we can
+    #   safely snap B to zero – numerically, the ellipse is essentially
+    #   axis‑aligned.
     diff   = (b_hat - a_hat) * (b_hat + a_hat)
     denom  = (a_hat * a_hat) * (b_hat * b_hat)
     delta  = diff / denom if abs(diff) > _DOUBLE_TINY else 0.0
     1/semi_a**2 - 1/semi_b**2
 
-    # coeffs - minimize rounding with fma
+    #coeffs - minimize rounding with fma
     sc = math.fma(sin_t, cos_t, 0.0) if hasattr(math, "fma") else sin_t * cos_t
     B  = 2.0 * sc * delta
 
@@ -131,7 +136,7 @@ def ellipse_params_to_general_form(center_x: float,
         "c": B,
         "d": np.float64(1.0),
         "h": center_x,
-        "k": center_y,
+        "w": center_y,
     }
 
 def generate_uint8_labels(w: int, h: int, cells_data: dict,
@@ -145,14 +150,14 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
         Expected structure::
 
             {
-                "indices":      [1, 2, ...],              # uint8 IDs (1‑255)
-                "fluorescence": [0.42, 0.17, ...],        # ignored here
+                "indices":      [1, 2, ...],              #uint8 IDs (1‑255)
+                "fluorescence": [0.42, 0.17, ...],        #ignored here
                 "shape":        [(a1, b1), (a2, b2), ...],
                 "location":     [(x1, y1), (x2, y2), ...],
-                "rotation":     [θ1, θ2, ...]             # degrees
+                "rotation":     [θ1, θ2, ...]             #degrees
             }
 
-        - ``'indices'`` must contain unique integers ≤ 255.  All lists must be
+        - ``'indices'`` must contain unique integers <=  255.  All lists must be
         the same length.
     - use_vectorized : bool, default ``True``
         If ``True`` masks are generated with :func:`create_ellipse_mask_vectorized`.
@@ -163,8 +168,8 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
     Returns:
     - uint8_labels: np.ndarray of shape (h, w) with dtype=np.uint8
         -------
-    uint8_labels : np.ndarray, shape ``(h, w)``, dtype ``np.uint8``
-        Background pixels hold 0; each ellipse interior is filled with its
+    uint8_labels : np.ndarray, shape ``(h, w)``, dtype ``np.uint8``
+        Background pixels hold 0; each ellipse interior is filled with its
         corresponding ID from ``cells_data['indices']``.
 
     - Notes
@@ -177,9 +182,9 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
     uint8_labels = np.zeros((h, w), dtype=np.uint8)
 
     indices    = cells_data["indices"]
-    shapes     = cells_data["shape"]       # list of (semi_a, semi_b)
-    locations  = cells_data["location"]    # list of (x, y)
-    rotations  = cells_data["rotation"]    # list of theta in degrees
+    shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
+    locations  = cells_data["location"]    #list of (x, y)
+    rotations  = cells_data["rotation"]    #list of theta in degrees
 
     print(f"Generating uint8 labels for {len(indices)} cells...")
     print(f"Output array shape: {uint8_labels.shape}, dtype: {uint8_labels.dtype}")
@@ -210,35 +215,42 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
     return uint8_labels
 
 
-def _implicit_value(A: float, C: float, B: float, dx, dy):
+def _implicit_value(A: float, B: float, C: float, dx, dy):
     #compute A*dx² + C*dy² + B*dx*dy element‑wise (broadcast friendly)
     return A * dx * dx + C * dy * dy + B * dx * dy
 
 def create_ellipse_mask_mathematical(w: int, h: int, coeffs: dict):
     """Pixel‑by‑pixel mask using the implicit form."""
-    A = coeffs["a"]; C = coeffs["b"]; B = coeffs["c"]
-    h0 = coeffs["h"]; k0 = coeffs["k"]
+    A = coeffs["a"]; B = coeffs["b"]; C = coeffs["c"]
+    h0 = coeffs["h"]; w0 = coeffs["w"]
+
+    scale_xy = float(max(w, h))               #put offsets in (‑1,1] range
+    thresh   = 1.0 / (scale_xy * scale_xy)    #F scales by 1/scale²
+
 
     mask = np.zeros((h, w), dtype=bool)
     for y in range(h):
-        dy = y - k0
+        dy32 = np.float32((y - w0) / scale_xy)
         for x in range(w):
-            dx = x - h0
-            if _implicit_value(A, C, B, dx, dy) <= 1.0:
+            dx32 = np.float32((x - h0) / scale_xy)
+            if _implicit_value(A, C, B, dx32, dy32) <= thresh:
                 mask[y, x] = True
     return mask
 
 
-
 def create_ellipse_mask_vectorized(w: int, h: int, coeffs: dict):
     """Vectorised Boolean mask via broadcasting."""
-    A = coeffs["a"]; C = coeffs["b"]; B = coeffs["c"]
-    h0 = coeffs["h"]; k0 = coeffs["k"]
+    A = coeffs["a"]; B = coeffs["b"]; C = coeffs["c"]
+    h0 = coeffs["h"]; w0 = coeffs["w"]
+
+    scale_xy = float(max(w, h))
+    thresh = np.float32(1.0 / (scale_xy * scale_xy))
 
     y_grid, x_grid = np.ogrid[:h, :w]
-    dx = x_grid - h0
-    dy = y_grid - k0
-    return _implicit_value(A, C, B, dx, dy) <= 1.0
+
+    dx32 = (x_grid - h0).astype(np.float32) / scale_xy
+    dy32 = (y_grid - w0).astype(np.float32) / scale_xy
+    return _implicit_value(A, C, B, dx32, dy32) <= thresh
 
 
 def generate_uint8_labels(w: int, h: int, cells_data: dict,
@@ -248,9 +260,9 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
     uint8_labels = np.zeros((h, w), dtype=np.uint8)
 
     indices    = cells_data["indices"]
-    shapes     = cells_data["shape"]       # list of (semi_a, semi_b)
-    locations  = cells_data["location"]    # list of (x, y)
-    rotations  = cells_data["rotation"]    # list of θ in degrees
+    shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
+    locations  = cells_data["location"]    #list of (x, y)
+    rotations  = cells_data["rotation"]    #list of θ in degrees
 
     mask_fn = create_ellipse_mask_vectorized if use_vectorized else create_ellipse_mask_mathematical
 
@@ -266,5 +278,36 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
 
 
 
+if __name__ == "__main__":
+    p = ellipse_params_to_general_form(10, 5, 5, 3, 30)
+    print(p)
+    W, H = 512, 512  #canvas size (px)
+    cx, cy = W / 2.0, H / 2.0  #centre
+    semi_a, semi_b = 140.0, 80.0  #axes lengths
+    theta_deg = 30.0  #rotation (deg)
 
+    coeffs = ellipse_params_to_general_form(cx, cy,
+                                           semi_a, semi_b, theta_deg)
 
+    #create_masks
+    t0 = time.perf_counter()
+    mask_loop = create_ellipse_mask_mathematical(W, H, coeffs)
+    t1 = time.perf_counter()
+    mask_vec = create_ellipse_mask_vectorized(W, H, coeffs)
+    t2 = time.perf_counter()
+
+    #correctness
+    identical = np.array_equal(mask_loop, mask_vec)
+    area_px = mask_loop.sum()
+
+    #console report
+    print("Ellipse parameters :",
+          f"centre=({cx:.1f},{cy:.1f})  a={semi_a}  b={semi_b}  θ={theta_deg}°")
+    print(f"Pixel‑loop mask    : {t1 - t0:.3f} s")
+    print(f"Vectorised mask    : {t2 - t1:.3f} s")
+    print(f"Masks identical    : {identical}")
+    print(f"Filled pixels      : {area_px}")
+    print("Saved mask.png")
+
+    #write 8‑bit image
+    imageio.imwrite("mask.png", (mask_vec.astype(np.uint8) * 255))
