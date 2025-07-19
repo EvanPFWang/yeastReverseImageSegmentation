@@ -203,7 +203,7 @@ def compare_mask_generation_methods() -> None:
 
 def example_complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
     """Run the full generate -> save -> visualise pipeline on a toy dataset."""
-    w, h = 128, 128
+    w, h = 128, 500
     cells_data = {
         "indices":       list(range(1, 10)),
         "fluorescence":  [100, 120, 80, 150, 90, 110, 130, 140, 95],
@@ -377,6 +377,9 @@ if __name__ == "__main__":
             bg_label=0,
             alpha=alpha  # transparency
         )
+
+        overlay = np.clip(overlay, 0, 1)
+
         plt.figure(figsize=(6, 6))
         plt.imshow(overlay)
         plt.axis("off")

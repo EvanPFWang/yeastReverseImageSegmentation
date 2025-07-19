@@ -1,6 +1,6 @@
 {
   "width": 128,
-  "height": 128,
+  "height": 500,
   "dtype": "uint8",
   "unique_labels": [
     0,
