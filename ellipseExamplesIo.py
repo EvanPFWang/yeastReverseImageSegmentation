@@ -360,24 +360,29 @@ if __name__ == "__main__":
         # ─── load & process here ───
 
 
-    def preview(mask_p, img_p, alpha=0.4):
-        mask_stack = tiff.imread(mask_p).astype(np.uint8)  # keep integer labels
-        img_stack = tiff.imread(img_p).astype(np.uint8)
+    def preview(mask_p, img_p, frame=0, alpha=0.4):
+        # -------- load one frame --------
+        mask = tiff.imread(mask_p)[frame]  # (H, W)  integer labels
+        img = tiff.imread(img_p)[frame]  # (H, W) or (H, W, 3)
 
-        gray_mask   = rgb2gray(mask_stack).mean(axis=-1)
-        gray_img  =   rgb2gray(img_stack).mean(axis=-1)
-
-        mask_norm = (gray_mask.astype(np.float32) / 255.0)
-        img_norm = (gray_img.astype(np.float32) / 255.0)
-
-
-        # colourise each label for visibility
-        rgb = label2rgb(mask_norm[0], image=img_norm[0], bg_label=0, alpha=alpha)
-        plt.figure(figsize=(6, 6));
-        plt.imshow(rgb);
+        # -------- prepare background --------
+        if img.ndim == 3 and img.shape[-1] == 3:  #rgb -> luminance
+            gray_img = rgb2gray(img)
+        else:  #already grayscale
+            gray_img = img.astype(np.float32)
+            gray_img /= gray_img.max() or 1  # normalise 0‑1
+        overlay = label2rgb(
+            mask,  # keep IDs intact
+            image=gray_img,
+            bg_label=0,
+            alpha=alpha  # transparency
+        )
+        plt.figure(figsize=(6, 6))
+        plt.imshow(overlay)
         plt.axis("off")
-        plt.title(mask_p.name);
+        plt.title(f"{mask_p.name} | frame {frame}")
         plt.show()
+
 
 
     # view the first pair
