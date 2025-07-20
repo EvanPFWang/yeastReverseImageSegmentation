@@ -1,6 +1,11 @@
 import imageio
-import numpy as np
+import numpy as np, seaborn as sns
+from sklearn.cluster import MiniBatchKMeans
+from skimage.color import lab2rgb
 from skimage.draw import ellipse
+
+
+
 import os
 import cv2
 import time
@@ -52,6 +57,7 @@ from  ellipseMath import (
     create_ellipse_mask_vectorized,
     create_ellipse_mask_mathematical,
     generate_uint8_labels,
+    generate_uint8_labels_cv2,
 )
 
 __all__ = [
@@ -69,7 +75,7 @@ __all__ = [
 # I/O HELPERS
 #                                                                           -
 
-def save_uint8_labels(uint8_labels: np.ndarray, base_filename: str) -> None:
+def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, base_filename: str) -> Dict[str, Any]:
     """Save a uint8 label map in four companion formats.
 
     1. Raw binary (`*.uint8`)
@@ -85,11 +91,10 @@ def save_uint8_labels(uint8_labels: np.ndarray, base_filename: str) -> None:
         Path *without* extension; the four outputs will append their own
         extensions as shown above.
     """
-
     if uint8_labels.dtype != np.uint8:
         raise TypeError("uint8_labels must be of dtype uint8")
 
-    # 1 — raw binary
+    # 1 — raw canvased  binary
     uint8_labels.tofile(f"{base_filename}.uint8")
     print(f"Saved raw binary: {base_filename}.uint8")
 
@@ -108,10 +113,13 @@ def save_uint8_labels(uint8_labels: np.ndarray, base_filename: str) -> None:
         "dtype": "uint8",
         "unique_labels": np.unique(uint8_labels).tolist(),
         "max_label": int(uint8_labels.max()),
+        "offset": offset
     }
     with open(f"{base_filename}_metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
     print(f"Saved metadata: {base_filename}_metadata.json")
+
+    return metadata
 
 
 def load_uint8_labels(filename: str, width: int, height: int) -> np.ndarray:
@@ -122,28 +130,26 @@ def load_uint8_labels(filename: str, width: int, height: int) -> np.ndarray:
     return flat_array.reshape((height, width))
 
 
-#                                                                           -
-# VISUALISATION
-#                                                                           -
+n   =   9
+rng =   np.random.default_rng(n)
+lab =   rng.uniform([-55, -55, -55], [55, 55, 55], size=(5000, 3))
+k   =   MiniBatchKMeans(n).fit(lab)
+rgb =   np.clip(lab2rgb(k.cluster_centers_[None])[0], 0, 1)
+_DEFAULT_COLORS = (rgb * 255).astype(np.uint8)
 
-_DEFAULT_COLORS = np.array([
-    [70, 50, 160],   # background (0)
-    [100, 200, 255], # 1
-    [80, 180, 255],  # 2
-    [120, 255, 255], # 3
-    [100, 200, 100], # 4
-    [150, 255, 150], # 5
-    [255, 255, 100], # 6
-    [255, 200, 100], # 7
-    [255, 150, 150], # 8
-    [200, 150, 255], # 9
-], dtype=np.uint8)
-
-
-def visualize_uint8_labels(uint8_labels: np.ndarray, colormap: np.ndarray | None = None) -> np.ndarray:
+def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict) -> np.ndarray:
     """Turn a label map into an RGB image using a lookup table.
     Extra labels beyond the length of the palette receive random colours.
     """
+
+    n,width,height   =   metadata["unique_labels"], metadata["width"], metadata["height"]
+
+    rng = np.random.default_rng(n)
+    lab = rng.uniform([-55, -55, -55], [55, 55, 55], size=(5000, 3))
+    k = MiniBatchKMeans(n).fit(lab)
+    rgb = np.clip(lab2rgb(k.cluster_centers_[None])[0], 0, 1)
+    colormap = (rgb * 255).astype(np.uint8)
+
     if colormap is None:
         colormap = _DEFAULT_COLORS.copy()
 
@@ -160,8 +166,8 @@ def visualize_uint8_labels(uint8_labels: np.ndarray, colormap: np.ndarray | None
 # BENCHMARK / DEMO UTILITIES
 #                                                                           -
 
-def _mask_pair(w: int, h: int, cx: float, cy: float, a: float, b: float, angle: float):
-    coeffs = ellipse_params_to_general_form(cx, cy, a, b, angle)
+def _mask_pair(w: int, h: int, center_x: float, center_y: float, a: float, b: float, angle: float):
+    coeffs = ellipse_params_to_general_form(center_x, center_y, a, b, angle)
     mask_math = create_ellipse_mask_mathematical(w, h, coeffs)
     mask_vec  = create_ellipse_mask_vectorized(w, h, coeffs)
     return mask_math, mask_vec
@@ -171,16 +177,16 @@ def compare_mask_generation_methods() -> None:
     """Benchmark pixel‑loop vs. vectorised mask generators for a single ellipse."""
 
     w, h = 128, 128
-    cx, cy = 64, 64
+    center_x, center_y = 64, 64
     a, b = 20, 15
     angle = 30
 
     print("=== Comparing Ellipse Mask Generation Methods ===")
     print(f"Image size: {w}x{h}")
-    print(f"Ellipse: center=({cx},{cy}), axes=({a},{b}), rotation={angle}°")
+    print(f"Ellipse: center=({center_x},{center_y}), axes=({a},{b}), rotation={angle}°")
 
     start = time.time()
-    mask_math, mask_vec = _mask_pair(w, h, cx, cy, a, b, angle)
+    mask_math, mask_vec = _mask_pair(w, h, center_x, center_y, a, b, angle)
     time_math = (time.time() - start) * 0.5  # first half for math
     time_vec  = time_math                    # second half for vec (same run)
 
@@ -215,19 +221,27 @@ def example_complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
         "rotation":      [0, 15, -20, 30, 0, 45, -10, 0, 25],
     }
 
-    print("=== STEP 1: Generate uint8 labels ===")
-    uint8_labels = generate_uint8_labels(w, h, cells_data)
+    print("=== STEP 1: Generate canvas of uint8 labels ===")
+    uint8_labels,dimensions,    offset = generate_uint8_labels(w, h, cells_data)
 
     print("\n=== STEP 2: Save uint8 labels ===")
-    save_uint8_labels(uint8_labels, "yeast_segmentation")
+    save_uint8_labels(uint8_labels, dimensions, offset, "dump0\canvased_yeast_segmentation")
+    cropped_uint8_labels  =   canvas_slicer(uint8_labels, dimensions, offset)
+    save_uint8_labels(cropped_uint8_labels, dimensions, offset, "dump0\cropped_yeast_segmentation")
 
     print("\n=== STEP 3: Visualise ===")
-    rgb_vis = visualize_uint8_labels(uint8_labels)
+    rgb_vis = visualize_uint8_labels(cropped_uint8_labels)
     imageio.imwrite("yeast_segmentation_visual.png", rgb_vis)
     print("Saved visualisation: yeast_segmentation_visual.png")
 
-    return uint8_labels, rgb_vis
+    return cropped_uint8_labels, rgb_vis
 
+def canvas_slicer(canvas:   np.ndarray,dimensions:tuple,offset) -> np.ndarray:
+    row_off, col_off = offset[0], offset[1]
+    raster_h, raster_w = dimensions[0], dimensions[1]
+    cropped =   canvas[row_off: row_off + raster_h,
+                  col_off: col_off + raster_w]
+    return cropped
 
 def inspect_uint8_output(uint8_labels: np.ndarray) -> None:
     """Pretty‑print basic stats and a small patch of a label image."""
@@ -253,59 +267,7 @@ def inspect_uint8_output(uint8_labels: np.ndarray) -> None:
 #                                                                           -
 
 
-def generate_uint8_labels_cv2(w: int,
-                              h: int,
-                              cells_data: dict) -> np.ndarray:
-    """
-    Alternative generator for very large batches where
-    Python‑level loops become the bottleneck.
-    Note that OpenCV uses the *endpoint‑inclusive* angle
-    convention (startAngle, endAngle), so we pass 0‑to‑360.
 
-
-    Rasterise filled ellipses directly with OpenCV and write the cell ID
-    into a uint‑8 mask.
-
-    Parameters
-    - w, h : int
-        - Output width × height in pixels.
-    - cells_data : dict
-        - Must contain the keys ``'indices'``, ``'shape'``, ``'location'``,
-        - and ``'rotation'`` (same schema as the coefficient‑based pipeline).
-
-    Returns
-    - uint8_labels : np.ndarray, shape ``(h, w)``, dtype ``uint8``
-            - Background pixels are 0; each ellipse interior is the
-            corresponding ID from ``cells_data['indices']``.
-    """
-    #allocate target image (background = 0)
-    uint8_labels = np.zeros((h, w), dtype=np.uint8)
-
-    indices,    shapes, locations,  rotations   = cells_data["indices"],  cells_data["shape"] ,   cells_data["location"], cells_data["rotation"]
-
-    #draw each ellipse in‑place
-    for cell_id, (a, b), (cx, cy), angle_rot_numbers in zip(
-        indices, shapes, locations, rotations
-    ):
-        if cell_id > 255:
-            raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
-
-        center = (int(round(cx)), int(round(cy)))   # integer pixel coords
-        axes   = (int(round(a)),  int(round(b)))    # integer semi‑axes
-
-        # thickness = –1 (cv2.FILLED) -> fill the ellipse interior
-        cv2.ellipse(
-            img       = uint8_labels,
-            center    = center,
-            axes      = axes,
-            angle     = float(angle_rot_numbers),  # CCW degrees
-            startAngle= 0,
-            endAngle  = 360,
-            color     = int(cell_id),  # write the ID value
-            thickness = -1
-        )
-
-    return uint8_labels
 
 
 
@@ -328,7 +290,7 @@ if __name__ == "__main__":
         "location": [(64, 64)],
         "rotation": [45],
     }
-    cv2_labels = generate_uint8_labels_cv2(128, 128, cv2_cells)
+    cv2_labels,dimensions,offset = generate_uint8_labels_cv2(128, 128, cv2_cells)
     print("OpenCV generator produced label with unique values:", np.unique(cv2_labels))
     inspect_uint8_output(cv2_labels)
     print("All tests completed successfully.")
@@ -375,7 +337,7 @@ if __name__ == "__main__":
             mask,  # keep IDs intact
             image=gray_img,
             bg_label=0,
-            alpha=alpha  # transparency
+            alpha=alpha  # transparencenter_y
         )
 
         overlay = np.clip(overlay, 0, 1)

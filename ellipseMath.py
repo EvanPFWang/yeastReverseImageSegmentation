@@ -2,6 +2,8 @@ import imageio
 import time
 import imageio.v2 as imageio  #imageio‑v3 friendly import
 import numpy as np
+from Demos.mmapfile_demo import offset
+from typing import Tuple, Dict, Any
 
 from skimage.draw import ellipse
 import os
@@ -17,7 +19,7 @@ notebook_directory = os.getcwd()
 print(f"Notebook directory: {notebook_directory}")
 
 #was going to use float32 given that the final results are in uint8 and the former gives 7
-#and float32 gives 7 decimal places of accuracy but the critical use to avoid cancellation error in  the following  c_coeff
+#and float32 gives 7 decimal places of accuracenter_y but the critical use to avoid cancellation error in  the following  c_coeff
 """
     VERY NUMERICALLY CRAZY BAD
         theta = np.deg2rad(angle_deg%360)
@@ -139,85 +141,76 @@ def ellipse_params_to_general_form(center_x: float,
         "w": center_y,
     }
 
-def generate_uint8_labels(w: int, h: int, cells_data: dict,
-                          *, use_vectorized: bool = True) -> np.ndarray:
-    """
-    Parameters:
+#def generate_uint8_labels(w: int, h: int, cells_data: dict,                          *, use_vectorized: bool = True) -> np.ndarray:
+"""
+Parameters:
 
-    - w, h : int
-        - Output image width and height **in pixels**.
-    - cells_data : dict
-        Expected structure::
+- w, h : int
+    - Output image width and height **in pixels**.
+- cells_data : dict
+    Expected structure::
 
-            {
-                "indices":      [1, 2, ...],              #uint8 IDs (1‑255)
-                "fluorescence": [0.42, 0.17, ...],        #ignored here
-                "shape":        [(a1, b1), (a2, b2), ...],
-                "location":     [(x1, y1), (x2, y2), ...],
-                "rotation":     [θ1, θ2, ...]             #degrees
-            }
+        {
+            "indices":      [1, 2, ...],              #uint8 IDs (1‑255)
+            "fluorescence": [0.42, 0.17, ...],        #ignored here
+            "shape":        [(a1, b1), (a2, b2), ...],
+            "location":     [(x1, y1), (x2, y2), ...],
+            "rotation":     [θ1, θ2, ...]             #degrees
+        }
 
-        - ``'indices'`` must contain unique integers <=  255.  All lists must be
-        the same length.
-    - use_vectorized : bool, default ``True``
-        If ``True`` masks are generated with :func:`create_ellipse_mask_vectorized`.
-        If ``False`` the pixel‑loop variant is used (slower, but easier to
-        debug).
-
-
-    Returns:
-    - uint8_labels: np.ndarray of shape (h, w) with dtype=np.uint8
-        -------
-    uint8_labels : np.ndarray, shape ``(h, w)``, dtype ``np.uint8``
-        Background pixels hold 0; each ellipse interior is filled with its
-        corresponding ID from ``cells_data['indices']``.
-
-    - Notes
-        - All heavy arithmetic is carried out in **float64** via
-          :func:`ellipse_params_to_general_form`; conversion to ``uint8`` happens
-          only at the final assignment step, ensuring numerical robustness.
-        - Raises ``ValueError`` if a cell ID exceeds 255.
-
-    """
-    uint8_labels = np.zeros((h, w), dtype=np.uint8)
-
-    indices    = cells_data["indices"]
-    shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
-    locations  = cells_data["location"]    #list of (x, y)
-    rotations  = cells_data["rotation"]    #list of theta in degrees
-
-    print(f"Generating uint8 labels for {len(indices)} cells...")
-    print(f"Output array shape: {uint8_labels.shape}, dtype: {uint8_labels.dtype}")
-    print(f"Using {'vectorized' if use_vectorized else 'mathematical'} ellipse generation")
-
-    #mask generation method
-    mask_fn = create_ellipse_mask_vectorized if use_vectorized else create_ellipse_mask_mathematical
+    - ``'indices'`` must contain unique integers <=  255.  All lists must be
+    the same length.
+- use_vectorized : bool, default ``True``
+    If ``True`` masks are generated with :func:`create_ellipse_mask_vectorized`.
+    If ``False`` the pixel‑loop variant is used (slower, but easier to
+    debug).
 
 
-    for cell_id, (semi_a, semi_b), (center_x, center_y), angle_rot_numbers in zip(indices, shapes, locations, rotations):
-        if cell_id > 255:
-            raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
+Returns:
+- uint8_labels: np.ndarray of shape (h, w) with dtype=np.uint8
+    -------
+uint8_labels : np.ndarray, shape ``(h, w)``, dtype ``np.uint8``
+    Background pixels hold 0; each ellipse interior is filled with its
+    corresponding ID from ``cells_data['indices']``.
 
-        coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle_rot_numbers)
-        cell_mask = mask_fn(w, h, coeffs)
-        uint8_labels[cell_mask] = cell_id
+- Notes
+    - All heavy arithmetic is carried out in **float64** via
+      :func:`ellipse_params_to_general_form`; conversion to ``uint8`` happens
+      only at the final assignment step, ensuring numerical robustness.
+    - Raises ``ValueError`` if a cell ID exceeds 255.
 
-        pixel_count = np.sum(cell_mask)
-        print(f"  Cell {cell_id}: center=({center_x},{center_y}), shape=({semi_a},{semi_b}), "
-              f"rotation={angle_rot_numbers} number, pixels={pixel_count}")
+"""
 
-    unique_labels = np.unique(uint8_labels)
-    print(f"\nUint8 label summary:")
-    print(f"  Unique values: {unique_labels}")
-    print(f"  Background pixels (0): {np.sum(uint8_labels == 0)}")
-    print(f"  Total labeled pixels: {np.sum(uint8_labels > 0)}")
-
-    return uint8_labels
 
 
 def _implicit_value(A: float, B: float, C: float, dx, dy):
     #compute A*dx² + C*dy² + B*dx*dy element‑wise (broadcast friendly)
     return A * dx * dx + C * dy * dy + B * dx * dy
+def center_offset(canvas_shape: Tuple, raster_shape:    Tuple):
+    """
+    Return offset to place the raster centre at the centre of the canvas.
+
+    Parameters
+    ----------
+    canvas_shape : tuple[int, int]
+        (height, width) of the big array, e.g. (2048, 2048)
+    raster_shape : tuple[int, int]
+        (height, width) of the smaller raster
+
+    Returns
+    -------
+    row_off, col_off : int
+        Offset to the top‑left corner where the raster should be pasted
+        so its centre aligns with the canvas centre.
+    """
+    ch, cw = canvas_shape
+    rh, rw = raster_shape
+
+    row_off = (ch - rh) // 2
+    col_off = (cw - rw) // 2
+    return row_off, col_off
+
+
 
 def create_ellipse_mask_mathematical(w: int, h: int, coeffs: dict):
     """Pixel‑by‑pixel mask using the implicit form."""
@@ -254,39 +247,114 @@ def create_ellipse_mask_vectorized(w: int, h: int, coeffs: dict):
 
 
 def generate_uint8_labels(w: int, h: int, cells_data: dict,
-                          *, use_vectorized: bool = True) -> np.ndarray:
+                          *, use_vectorized: bool = True)\
+        -> tuple[np.ndarray,tuple[int,int],tuple[int,int]]:
     """Generate a uint8 label image for a collection of elliptical cells."""
 
-    uint8_labels = np.zeros((h, w), dtype=np.uint8)
+    canvas_h, canvas_w = 2048, 2048
+    raster_h, raster_w = h, w
+    canvas_shape = (canvas_h, canvas_w)
+    raster_shape = (raster_h, raster_w)
+
+    #uint8_labels = np.zeros((h, w), dtype=np.uint8)
+    uint8_labels = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+
+    row_off, col_off = center_offset(canvas_shape, raster_shape)
+
 
     indices    = cells_data["indices"]
     shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
     locations  = cells_data["location"]    #list of (x, y)
     rotations  = cells_data["rotation"]    #list of θ in degrees
 
-    mask_fn = create_ellipse_mask_vectorized if use_vectorized else create_ellipse_mask_mathematical
+    roi = uint8_labels[row_off: row_off + raster_h,
+          col_off: col_off + raster_w]
 
-    for cell_id, (semi_a, semi_b), (cx, cy), angle in zip(indices, shapes, locations, rotations):
+    mask_fn = (create_ellipse_mask_vectorized   if use_vectorized   else create_ellipse_mask_mathematical)
+    for cell_id, (semi_a, semi_b), (center_x, center_y), angle in zip(indices, shapes, locations, rotations):
         if cell_id > 255:
             raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
 
-        coeffs   = ellipse_params_to_general_form(cx, cy, semi_a, semi_b, angle)
-        cell_msk = mask_fn(w, h, coeffs)
-        uint8_labels[cell_msk] = cell_id
+        coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
+        cell_msk = mask_fn(raster_w, raster_h, coeffs)
+        roi[cell_msk] = cell_id
+        #draw all cells on canvas
+    return uint8_labels,    raster_shape,   (row_off, col_off)
 
-    return uint8_labels
+
+def generate_uint8_labels_cv2(w: int,   h: int, cells_data: dict)\
+        -> tuple[np.ndarray,tuple[int,int],tuple[int,int]]:
+    """
+    Alternative generator for very large batches where
+    Python‑level loops become the bottleneck.
+    Note that OpenCV uses the *endpoint‑inclusive* angle
+    convention (startAngle, endAngle), so we pass 0‑to‑360.
 
 
+    Rasterise filled ellipses directly with OpenCV and write the cell ID
+    into a uint‑8 mask.
+
+    Parameters
+    - w, h : int
+        - Output width × height in pixels.
+    - cells_data : dict
+        - Must contain the keys ``'indices'``, ``'shape'``, ``'location'``,
+        - and ``'rotation'`` (same schema as the coefficient‑based pipeline).
+
+    Returns
+    - uint8_labels : np.ndarray, shape ``(h, w)``, dtype ``uint8``
+            - Background pixels are 0; each ellipse interior is the
+            corresponding ID from ``cells_data['indices']``.
+    """
+    #allocate target image (background = 0)
+
+    canvas_h, canvas_w = 2048, 2048
+    raster_h, raster_w = h, w
+    canvas_shape = (canvas_h, canvas_w)
+    raster_shape = (raster_h, raster_w)
+
+    #uint8_labels = np.zeros((h, w), dtype=np.uint8)
+    uint8_labels = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+    row_off, col_off = center_offset(canvas_shape, raster_shape)
+
+
+    indices,    shapes, locations,  rotations   = cells_data["indices"],  cells_data["shape"] ,   cells_data["location"], cells_data["rotation"]
+    #roi slices window into `uint8_labels`, so cv2 draws in place
+    roi = uint8_labels[row_off: row_off + raster_h,
+                 col_off: col_off + raster_w]
+    #draw each ellipse in‑place
+    for cell_id, (a, b), (center_x, center_y), angle_rot_numbers in zip(
+        indices, shapes, locations, rotations
+    ):
+        if cell_id > 255:
+            raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
+
+        center = (int(round(center_x)), int(round(center_y)))   # integer pixel coords
+        axes   = (int(round(a)),  int(round(b)))    # integer semi‑axes
+
+        # thickness = –1 (cv2.FILLED) -> fill the ellipse interior
+        cv2.ellipse(
+            img       = roi,
+            center    = center,
+            axes      = axes,
+            angle     = float(angle_rot_numbers),  # CCW degrees
+            startAngle= 0,
+            endAngle  = 360,
+            color     = int(cell_id),  # write the ID value
+            thickness = -1
+        )
+
+    return uint8_labels,    raster_shape,   (row_off, col_off)
 
 if __name__ == "__main__":
     p = ellipse_params_to_general_form(10, 5, 5, 3, 30)
     print(p)
     W, H = 512, 512  #canvas size (px)
-    cx, cy = W / 2.0, H / 2.0  #centre
+    center_x, center_y = W / 2.0, H / 2.0  #centre
     semi_a, semi_b = 140.0, 80.0  #axes lengths
     theta_deg = 30.0  #rotation (deg)
 
-    coeffs = ellipse_params_to_general_form(cx, cy,
+    coeffs = ellipse_params_to_general_form(center_x, center_y,
                                            semi_a, semi_b, theta_deg)
 
     #create_masks
@@ -302,7 +370,7 @@ if __name__ == "__main__":
 
     #console report
     print("Ellipse parameters :",
-          f"centre=({cx:.1f},{cy:.1f})  a={semi_a}  b={semi_b}  θ={theta_deg}°")
+          f"centre=({center_x:.1f},{center_y:.1f})  a={semi_a}  b={semi_b}  θ={theta_deg}°")
     print(f"Pixel‑loop mask    : {t1 - t0:.3f} s")
     print(f"Vectorised mask    : {t2 - t1:.3f} s")
     print(f"Masks identical    : {identical}")
