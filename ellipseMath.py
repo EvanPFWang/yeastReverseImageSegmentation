@@ -41,7 +41,8 @@ print(f"Notebook directory: {notebook_directory}")
 #rounding noise may accumulate past 7 decimal places
 _DOUBLE_EPS  = np.finfo(np.float64).eps     #≈ 2.22e‑16
 _DOUBLE_TINY = np.finfo(np.float64).tiny    #≈ 2.23e‑308
-
+_SINGLE_EPS = np.finfo(np.float32).eps
+_SINGLE_TINY = np.finfo(np.float32).tiny
 
 
 def ellipse_params_to_general_form(center_x: float,
@@ -231,19 +232,45 @@ def create_ellipse_mask_mathematical(w: int, h: int, coeffs: dict):
     return mask
 
 
-def create_ellipse_mask_vectorized(w: int, h: int, coeffs: dict):
-    """Vectorised Boolean mask via broadcasting."""
-    A = coeffs["a"]; B = coeffs["b"]; C = coeffs["c"]
-    h0 = coeffs["h"]; w0 = coeffs["w"]
+def create_ellipse_mask_vectorized(w: int, h: int, coeffs: dict,
+                                             jitter: float = 0.07,
+                                             noise_scale: int = 64,
+                                             seed: int | None = None):
+    """
+    As `create_ellipse_mask_vectorized`, but boundary is perturbed by Perlin
+    noise.  `jitter` ≈ relative amplitude; `noise_scale` controls feature size.
+    """
+    rng = np.random.default_rng(seed)
+    a32,    b32,    center_x,   center_y  = np.float32(np.sqrt(coeffs["a"])),np.float32(np.sqrt(coeffs["b"])),
+    np.float32(np.sqrt(coeffs["b"])),np.float32(np.sqrt(coeffs["b"]))
+     =
+    # Recover pixel semi‑axes from implicit coefficients
+    scale = np.float32(max(a32, b32))
+    a = a32 / scale #keep   <=  1 to dodge overflow
+    b = b32 / scale
 
-    scale_xy = float(max(w, h))
-    thresh = np.float32(1.0 / (scale_xy * scale_xy))
+    eps =   _SINGLE_EPS
 
-    y_grid, x_grid = np.ogrid[:h, :w]
 
-    dx32 = (x_grid - h0).astype(np.float32) / scale_xy
-    dy32 = (y_grid - w0).astype(np.float32) / scale_xy
-    return _implicit_value(A, C, B, dx32, dy32) <= thresh
+    cx, cy = coeffs["h"], coeffs["w"]
+
+    # Coordinate grids
+    y, x = np.ogrid[:h, :w]
+    dx, dy = x - cx, y - cy
+    r_px = np.hypot(dx, dy)
+    theta = np.arctan2(dy, dx)
+
+    # Ideal ellipse radius for every pixel direction
+    r_ideal = (a * b) / np.sqrt((b * np.cos(theta))**2 +
+                                (a * np.sin(theta))**2)
+
+    # 2‑D Perlin noise field ∈ [‑1,1]
+    n = np.vectorize(lambda yy, xx:
+                     pnoise2(xx / noise_scale, yy / noise_scale,
+                             repeatx=w, repeaty=h, base=seed or 0))
+    delta = jitter * n(*np.indices((h, w)))
+
+    return r_px <= r_ideal * (1.0 + delta)
 
 
 def generate_uint8_labels(w: int, h: int, cells_data: dict,
