@@ -1,5 +1,9 @@
 import imageio
+import imageio.v2 as iio2  #imageio‑v3 friendly import
+import imageio.v3 as iio3
+
 import numpy as np, seaborn as sns
+from cv2.detail import strip
 from numpy import ndarray
 from sklearn.cluster import MiniBatchKMeans
 from skimage.color import lab2rgb
@@ -130,8 +134,11 @@ def load_uint8_labels(filename: str, width: int, height: int) -> np.ndarray:
     return flat_array.reshape((height, width))
 
 def n_spaced_rgb(n:int=9):
+    """
+    Generate perceptually spaced cluster centers in array of shape (n_clusters,3) with Lab coords
+    """
     rng = np.random.default_rng(n)
-    lab = rng.uniform([0, -40, -40],  # L* ≥ 0
+    lab = rng.uniform([0, -40, -40],  # L* >= 0
                       [100, 40, 40],  # cut a*,b* to a sensible gamut‑like cube
                       size=(5000, 3))
     k = MiniBatchKMeans(n_clusters=n, batch_size=1536).fit(lab)
@@ -139,9 +146,47 @@ def n_spaced_rgb(n:int=9):
     # lab2rgb clips automatically when clip=True; no warning when input is valid
     rgb = np.clip(lab2rgb(k.cluster_centers_[None])[0], 0.0, 1.0)
     return  (rgb * 255).astype(np.uint8)
+def order_by_nearest_neighbor(colors: np.ndarray, start_color: np.ndarray) -> List[np.ndarray]:
+    """
+    Given an array of colors (m,3) and a start_color (3,),
+    return a list of those colors ordered by greedily picking
+    the nearest next color in RGB‐Euclidean space.
+    """
+    remaining = [tuple(c) for c in colors]
+    current = tuple(start_color)
+    ordered = []
+    while remaining:
+        # find nearest
+        dists = [np.linalg.norm(np.array(c) - np.array(current)) for c in remaining]
+        idx = int(np.argmin(dists))
+        ordered.append(np.array(remaining.pop(idx), dtype=np.uint8))
+        current = tuple(ordered[-1])
+    return ordered
 _DEFAULT_COLORS = n_spaced_rgb()
 print(_DEFAULT_COLORS)
 
+def palette_to_strip(rgb_float, h,thickness,
+                   out_file="palette.png"):
+    """
+    rgb_float : (n,3) array in 0-255 *float*
+    h         : image height in pixels
+    """
+    rgb_u8 = np.clip(np.round(rgb_float), 0, 255).astype(np.uint8)
+    anchors = np.linspace(0, h - 1, len(rgb_float), dtype=np.float32)
+    base = np.arange(h, dtype=np.float32)
+    #build a 1-pixel-wide column, then widen
+    col = np.empty((h, 1, 3), dtype=np.uint8)
+    for ch in range(3):  # R, G, B channels
+        col[:, 0, ch] = np.interp(base, anchors, rgb_u8[:, ch]).round().astype(
+            np.uint8)
+
+    img = np.tile(col, (1, thickness, 1))
+
+    iio3.imwrite(out_file, img)
+
+    return img
+thickness=10
+strip   =   palette_to_strip(_DEFAULT_COLORS,200,thickness)
 def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict) -> np.ndarray:
     """Turn a label map into an RGB image using a lookup table.
     Extra labels beyond the length of the palette receive random colours.
@@ -205,7 +250,7 @@ def complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
         "fluorescence":  [100, 120, 80, 150, 90, 110, 130, 140, 95],
         "size":          [15, 18, 14, 20, 16, 17, 19, 18, 15],
         "shape":         [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
-                           (9, 9), (11, 8), (78, 9), (18, 7)],
+                           (9, 9), (11, 8), (45, 9), (18, 7)],
         "location":      [(30, 25), (30, 50), (40, 80), (60, 30),
                            (85, 70), (110, 25), (110, 85), (110, 110), (80, 110)],
         "rotation":      [0, 15, -20, 30, 0, 45, -10, 0, 25],

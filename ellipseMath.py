@@ -1,6 +1,7 @@
 import imageio
 import time
-import imageio.v2 as imageio  #imageio‑v3 friendly import
+import imageio.v2 as iio2  #imageio‑v3 friendly import
+import imageio.v3 as iio3
 import numpy as np
 from typing import Tuple, Dict, Any
 
@@ -10,6 +11,7 @@ import os
 import cv2
 
 import math
+from perlin_numpy   import  generate_perlin_noise_2d
 print("Done Importing")
 
 
@@ -44,86 +46,6 @@ _DOUBLE_EPS  = np.finfo(np.float64).eps     #≈ 2.22e‑16
 _DOUBLE_TINY = np.finfo(np.float64).tiny    #≈ 2.23e‑308
 _SINGLE_EPS = np.finfo(np.float32).eps
 _SINGLE_TINY = np.finfo(np.float32).tiny
-
-def old_mask_mathematical(w: int, h: int, coeffs: dict, offset):
-    A,B,C,center_x,center_y = coeffs["a"],coeffs["b"],coeffs["c"],coeffs["k"],coeffs["l"]
-    W,H = 2048, 2048
-    mask = np.zeros((H, W), dtype=bool)
-    scale_xy    =   max(semi_a, semi_b)
-    offset_row, offset_col = offset[0], offset[1]
-    center_x+=row_offset
-    center_y+=col_offset
-
-
-
-    for y in range(H):
-        dy = y - center_y
-        for x in range(w):
-            dx = x - center_x
-            if _implicit_value(A, C, B, dx, dy) <= 1.0:
-                mask[y, x] = True
-
-    """    for y in range(h):
-        dy32 = np.float32((y - center_x) / scale_xy)
-        dx32 = np.float32((x - center_y) / scale_xy)
-    if _implicit_value(A, C, B, dx32, dy32) <= thresh:
-        mask[y,x] = True"""
-    return mask
-
-
-
-
-
-def old_mask_vectorized(w: int, h: int, coeffs: dict,offset):
-    """Vectorised Boolean mask via broadcasting."""
-    A = coeffs["a"]; B = coeffs["b"]; C = coeffs["c"]
-    h0 = coeffs["k"]; w0 = coeffs["l"]
-
-    W,H =   2048, 2048
-
-
-
-    scale_xy = float(max(w, h))
-    thresh = np.float32(1.0 / (scale_xy * scale_xy))
-
-    y_grid, x_grid = np.mgrid[0:h, 0:w]
-    dx32 = (x_grid - h0).astype(np.float32) / scale_xy
-    dy32 = (y_grid - w0).astype(np.float32) / scale_xy
-    return _implicit_value(A, B, C, dx32, dy32) <= thresh
-"""
-    def old_generate_uint8_labels(w: int, h: int, cells_data: dict,
-                              *, use_vectorized: bool = True)\
-            -> tuple[np.ndarray,tuple[int,int],tuple[int,int]]:
-    canvas_shape = (2048, 2048)
-    raster_shape = (h, w)
-
-    #uint8_labels = np.zeros((h, w), dtype=np.uint8)
-    uint8_labels = np.zeros(canvas_shape, dtype=np.uint8)
-
-    row_off, col_off = center_offset(canvas_shape, raster_shape)
-
-
-    indices    = cells_data["indices"]
-    shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
-    locations  = cells_data["location"]    #list of (x, y)
-    rotations  = cells_data["rotation"]    #list of θ in degrees
-
-    roi = uint8_labels[row_off: row_off + raster_shape[1],
-          col_off: col_off + raster_shape[0]]#sincelooking for w then h
-
-    #mask_fn = old__mask_vectorized    if  use_vectorized else old_mask_math
-    
-    for cell_id, (semi_a, semi_b), (center_x, center_y), angle in zip(indices, shapes, locations, rotations):
-        if cell_id > 255:
-            raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
-        coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
-        cell_msk = mask_fn(raster_shape[0], raster_shape[1], coeffs)[row_off: row_off + raster_shape[1],
-          col_off: col_off + raster_shape[0]]
-        roi[cell_msk] = cell_id
-        #draw all cells on canvas
-    return uint8_labels,    raster_shape,   (row_off, col_off)
-"""
-
 
 
 def ellipse_params_to_general_form(center_x: float,
@@ -305,13 +227,13 @@ def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
     r_ideal =   (a32_hat * b32_hat)*scale/denom
     # 2‑D Perlin noise field ∈ [‑1,1]
 
+    res_y, res_x = max(1, h // noise_scale), max(1, w // noise_scale)
     print("MAKE NOISE")
-    noise = np.clip(np.vectorize(lambda y0, x0: pnoise2(x0/noise_scale,
-                                                     y0/noise_scale,
-                                                     repeatx=w, repeaty=h,
-                                                     base=seed or 0),
-                               otypes=[np.float32])(yy, xx),
-                  -1.0, 1.0)
+    noise = generate_perlin_noise_2d(
+        (h, w),
+        (res_y, res_x),
+        tileable=(True, True)
+    ).astype(np.float32)
     delta = jitter * noise
     r_px = np.hypot(dx, dy)
     print(f"PIXELS BACK - scale {scale}")
@@ -319,6 +241,64 @@ def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
     #return r_px <= scale
     return r_px <= r_ideal * (1.0 + delta   +   eps) #to keep label pixels lying on the actual boundary
     #returns bool mask as labels for this cell over whole 2048
+
+def _fit_periods(dim: int, approx_cell: int) -> int:
+    """
+    smallest period count res >= dim/approx_cell such that dim % res == 0.
+    """
+    res = max(1, round(dim / approx_cell))
+    while dim % res:             # bump up until it divides cleanly
+        res += 1
+    return res
+def create_ellipse_mask_vectorized_perturbed2(w: int, h: int, coeffs: dict,
+                                                   jitter: np.float32 = 0.07,
+                                                   noise_scale: int = 64,
+                                                   offset: tuple[int, int] = (0, 0),
+                                                   seed: int | None = None):
+    """
+    OGRID version: identical maths, but `yy, xx` are broadcast‑compatible
+    arrays of shapes (h,1) and (1,w) instead of two full (h,w) arrays.
+    also implement perlin-numpy with speed ups over vectorize and lambda func with pnoise2
+
+
+    use of pure numpyy kernels, runs loops in C/BLAS rather than 4m calls to each pixel in 2048
+    better for interpreter with O(1) numpy ops
+    former is scalar strided with horrible cache locality
+    """
+    # 2048x2048
+    # r(θ) = ab / sqrt((b cosθ)^2 + (a sinθ)^2)
+    semi_a, semi_b = coeffs["semi_a"], coeffs["semi_b"]
+    offset_row, offset_col = offset[0], offset[1]
+    center_x, center_y = coeffs["k"] + offset_col, offset_row + coeffs["l"]
+
+    eps = np.finfo(np.float32).eps
+    scale = max(semi_a, semi_b)
+    a32_hat, b32_hat = semi_a / scale, semi_b / scale
+
+    # Sparse coordinate grids: shapes (h,1) and (1,w)
+    yy, xx = np.ogrid[:2048, :2048]     # or :h, :w if you generalise
+
+    dx, dy = xx - center_x, yy - center_y
+    theta = np.arctan2(dy, dx, dtype=np.float32)
+
+    denom = np.hypot(b32_hat * np.cos(theta), a32_hat * np.sin(theta))
+    r_ideal = (a32_hat * b32_hat) * scale / denom
+
+    res_y = _fit_periods(2048, noise_scale)
+    res_x = _fit_periods(2048, noise_scale)#i want it over the WHOLE THING
+
+    noise = generate_perlin_noise_2d(
+        (2048, 2048),
+        (res_y, res_x),
+        tileable=(True  , False)
+    ).astype(np.float32)
+
+    delta = jitter * noise
+    r_px = np.hypot(dx, dy)
+
+    return r_px <= r_ideal * (1.0 + delta + eps)
+
+
 
 
 def generate_uint8_labels(w: int, h: int, cells_data: dict,
@@ -339,17 +319,17 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
     shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
     locations  = cells_data["location"]    #list of (x, y)
     rotations  = cells_data["rotation"]    #list of θ in degrees
-
+    n   =   len(indices)
     roi = uint8_labels[row_off: row_off + raster_shape[0],
           col_off: col_off + raster_shape[1]]#sincelooking for w then h
-
-    mask_fn = create_ellipse_mask_vectorized_perturbed
+    cell_msk    =   np.zeros((n,2048,2048))
+    mask_fn = create_ellipse_mask_vectorized_perturbed2
     for cell_id, (semi_a, semi_b), (center_x, center_y), angle in zip(indices, shapes, locations, rotations):
         if cell_id > 255:
             raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
         coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
         cell_msk = mask_fn(raster_shape[1], raster_shape[0], \
-                           coeffs,0.15,100,\
+                           coeffs,0.15,64,\
                            [row_off,col_off])\
             [row_off:row_off+h,col_off:col_off+w]
         print(np.sum(1*cell_msk))
@@ -431,7 +411,7 @@ if __name__ == "__main__":
                                            semi_a, semi_b, theta_deg)
 
     row_offset, col_offset =   center_offset((2048, 2048), (512,512))
-    mask_vec = create_ellipse_mask_vectorized_perturbed(W, H, coeffs,0.08,29, (row_offset, col_offset), max(W,H)%min(W,H))
+    #mask_vec = create_ellipse_mask_vectorized_perturbed(W, H, coeffs,0.08,29, (row_offset, col_offset), max(W,H)%min(W,H))
 
 
 
@@ -442,4 +422,4 @@ if __name__ == "__main__":
     print("Saved mask.png")
 
     #write 8‑bit image
-    imageio.imwrite("mask.png", (mask_vec.astype(np.uint8) * 255))
+    #imageio.imwrite("mask.png", (mask_vec.astype(np.uint8) * 255))
