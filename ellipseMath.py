@@ -45,6 +45,86 @@ _DOUBLE_TINY = np.finfo(np.float64).tiny    #≈ 2.23e‑308
 _SINGLE_EPS = np.finfo(np.float32).eps
 _SINGLE_TINY = np.finfo(np.float32).tiny
 
+def old_mask_mathematical(w: int, h: int, coeffs: dict, offset):
+    A,B,C,center_x,center_y = coeffs["a"],coeffs["b"],coeffs["c"],coeffs["k"],coeffs["l"]
+    W,H = 2048, 2048
+    mask = np.zeros((H, W), dtype=bool)
+    scale_xy    =   max(semi_a, semi_b)
+    offset_row, offset_col = offset[0], offset[1]
+    center_x+=row_offset
+    center_y+=col_offset
+
+
+
+    for y in range(H):
+        dy = y - center_y
+        for x in range(w):
+            dx = x - center_x
+            if _implicit_value(A, C, B, dx, dy) <= 1.0:
+                mask[y, x] = True
+
+    """    for y in range(h):
+        dy32 = np.float32((y - center_x) / scale_xy)
+        dx32 = np.float32((x - center_y) / scale_xy)
+    if _implicit_value(A, C, B, dx32, dy32) <= thresh:
+        mask[y,x] = True"""
+    return mask
+
+
+
+
+
+def old_mask_vectorized(w: int, h: int, coeffs: dict,offset):
+    """Vectorised Boolean mask via broadcasting."""
+    A = coeffs["a"]; B = coeffs["b"]; C = coeffs["c"]
+    h0 = coeffs["k"]; w0 = coeffs["l"]
+
+    W,H =   2048, 2048
+
+
+
+    scale_xy = float(max(w, h))
+    thresh = np.float32(1.0 / (scale_xy * scale_xy))
+
+    y_grid, x_grid = np.mgrid[0:h, 0:w]
+    dx32 = (x_grid - h0).astype(np.float32) / scale_xy
+    dy32 = (y_grid - w0).astype(np.float32) / scale_xy
+    return _implicit_value(A, B, C, dx32, dy32) <= thresh
+"""
+    def old_generate_uint8_labels(w: int, h: int, cells_data: dict,
+                              *, use_vectorized: bool = True)\
+            -> tuple[np.ndarray,tuple[int,int],tuple[int,int]]:
+    canvas_shape = (2048, 2048)
+    raster_shape = (h, w)
+
+    #uint8_labels = np.zeros((h, w), dtype=np.uint8)
+    uint8_labels = np.zeros(canvas_shape, dtype=np.uint8)
+
+    row_off, col_off = center_offset(canvas_shape, raster_shape)
+
+
+    indices    = cells_data["indices"]
+    shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
+    locations  = cells_data["location"]    #list of (x, y)
+    rotations  = cells_data["rotation"]    #list of θ in degrees
+
+    roi = uint8_labels[row_off: row_off + raster_shape[1],
+          col_off: col_off + raster_shape[0]]#sincelooking for w then h
+
+    #mask_fn = old__mask_vectorized    if  use_vectorized else old_mask_math
+    
+    for cell_id, (semi_a, semi_b), (center_x, center_y), angle in zip(indices, shapes, locations, rotations):
+        if cell_id > 255:
+            raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
+        coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
+        cell_msk = mask_fn(raster_shape[0], raster_shape[1], coeffs)[row_off: row_off + raster_shape[1],
+          col_off: col_off + raster_shape[0]]
+        roi[cell_msk] = cell_id
+        #draw all cells on canvas
+    return uint8_labels,    raster_shape,   (row_off, col_off)
+"""
+
+
 
 def ellipse_params_to_general_form(center_x: float,
                                    center_y: float,
@@ -146,40 +226,6 @@ def ellipse_params_to_general_form(center_x: float,
 
 #def generate_uint8_labels(w: int, h: int, cells_data: dict,
 # *, use_vectorized: bool = True) -> np.ndarray:
-"""
-Parameters:
-
-- w, h : int
-    - Output image width and height **in pixels**.
-- cells_data : dict
-    Expected structure::
-
-        {
-            "indices":      [1, 2, ...],              #uint8 IDs (1‑255)
-            "fluorescence": [0.42, 0.17, ...],        #ignored here
-            "shape":        [(a1, b1), (a2, b2), ...],
-            "location":     [(x1, y1), (x2, y2), ...],
-            "rotation":     [θ1, θ2, ...]             #degrees
-        }
-
-    - ``'indices'`` must contain unique integers <=  255.  All lists must be
-    the same length.
-
-Returns:
-- uint8_labels: np.ndarray of shape (h, w) with dtype=np.uint8
-    -------
-uint8_labels : np.ndarray, shape ``(h, w)``, dtype ``np.uint8``
-    Background pixels hold 0; each ellipse interior is filled with its
-    corresponding ID from ``cells_data['indices']``.
-
-- Notes
-    - All heavy arithmetic is carried out in **float64** via
-      :func:`ellipse_params_to_general_form`; conversion to ``uint8`` happens
-      only at the final assignment step, ensuring numerical robustness.
-    - Raises ``ValueError`` if a cell ID exceeds 255.
-
-"""
-
 
 
 def _implicit_value(A: float, B: float, C: float, dx, dy):
@@ -188,7 +234,6 @@ def _implicit_value(A: float, B: float, C: float, dx, dy):
 def center_offset(canvas_shape: Tuple, raster_shape:    Tuple):
     """
     Return offset to place the raster centre at the centre of the canvas.
-
     Parameters
     ----------
     canvas_shape : tuple[int, int]
@@ -228,15 +273,16 @@ def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
     ySqr_coeff = coeffs["B"]
 
 
-    #offset_row, offset_col = offset[0], offset[1]
-    center_x, center_y = coeffs["k"]+row_offset, col_offset+coeffs["l"]
+    offset_row, offset_col = offset[0], offset[1]
+    center_x, center_y = coeffs["k"]+offset_col, \
+        offset_row+coeffs["l"]
     #h is height and w is width so coordinate grids
 
 
     eps =   np.finfo(np.float32).eps
     scale   =   max(semi_a,semi_b)
     a32_hat,    b32_hat =   semi_a/scale,    semi_b/scale
-    y_grid, x_grid = np.ogrid[:h, :w]
+    y_grid, x_grid = np.ogrid[:2048, :2048] #[:h,:w]
     #
     
     yy, xx = np.indices((2048, 2048))
@@ -247,13 +293,19 @@ def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
     # Ideal ellipse radius for every pixel direction
     #r_ideal = (a * b) / np.sqrt((b * np.cos(theta)) ** 2 +
     #                            (a * np.sin(theta)) ** 2)
-    #scale gets taken out so all we deal with are the hats
-    #fix with
+    #       =scale^2*a_hat*b_hat/
+#(cont.)  np.sqrt(scale^2*[(b_hat*cos)^2+(a_hat*sin)^2])
+    #       =scale*a_hat*b_hat/
+    # (cont.)  np.sqrt([(b_hat*cos)^2+(a_hat*sin)^2])
+
+    #scale in top and bottom gets taken out
+    # so all we deal with are the hats  and one scale
+    # leads to more bits to work with
     denom = np.hypot(b32_hat*np.cos(theta), a32_hat*np.sin(theta))
-    r_ideal =   (a32_hat * b32_hat) /   denom*scale
+    r_ideal =   (a32_hat * b32_hat)*scale/denom
     # 2‑D Perlin noise field ∈ [‑1,1]
 
-
+    print("MAKE NOISE")
     noise = np.clip(np.vectorize(lambda y0, x0: pnoise2(x0/noise_scale,
                                                      y0/noise_scale,
                                                      repeatx=w, repeaty=h,
@@ -262,6 +314,9 @@ def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
                   -1.0, 1.0)
     delta = jitter * noise
     r_px = np.hypot(dx, dy)
+    print(f"PIXELS BACK - scale {scale}")
+    print(np.sum(r_px <= scale))
+    #return r_px <= scale
     return r_px <= r_ideal * (1.0 + delta   +   eps) #to keep label pixels lying on the actual boundary
     #returns bool mask as labels for this cell over whole 2048
 
@@ -285,16 +340,19 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
     locations  = cells_data["location"]    #list of (x, y)
     rotations  = cells_data["rotation"]    #list of θ in degrees
 
-    roi = uint8_labels[row_off: row_off + raster_shape[1],
-          col_off: col_off + raster_shape[0]]#sincelooking for w then h
+    roi = uint8_labels[row_off: row_off + raster_shape[0],
+          col_off: col_off + raster_shape[1]]#sincelooking for w then h
 
     mask_fn = create_ellipse_mask_vectorized_perturbed
     for cell_id, (semi_a, semi_b), (center_x, center_y), angle in zip(indices, shapes, locations, rotations):
         if cell_id > 255:
             raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
         coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
-        cell_msk = mask_fn(raster_shape[0], raster_shape[1], coeffs)[row_off: row_off + raster_shape[1],
-          col_off: col_off + raster_shape[0]]
+        cell_msk = mask_fn(raster_shape[1], raster_shape[0], \
+                           coeffs,0.15,100,\
+                           [row_off,col_off])\
+            [row_off:row_off+h,col_off:col_off+w]
+        print(np.sum(1*cell_msk))
         roi[cell_msk] = cell_id
         #draw all cells on canvas
     return uint8_labels,    raster_shape,   (row_off, col_off)
@@ -325,21 +383,18 @@ def generate_uint8_labels_cv2(w: int,   h: int, cells_data: dict)\
             corresponding ID from ``cells_data['indices']``.
     """
     #allocate target image (background = 0)
-
-    canvas_h, canvas_w = 2048, 2048
-    raster_h, raster_w = h, w
-    canvas_shape = (canvas_h, canvas_w)
-    raster_shape = (raster_h, raster_w)
+    canvas_shape = (2048, 2048)
+    raster_shape = (h, w)
 
     #uint8_labels = np.zeros((h, w), dtype=np.uint8)
-    uint8_labels = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+    uint8_labels = np.zeros((canvas_shape[0], canvas_shape[1]), dtype=np.uint8)
     row_off, col_off = center_offset(canvas_shape, raster_shape)
 
 
     indices,    shapes, locations,  rotations   = cells_data["indices"],  cells_data["shape"] ,   cells_data["location"], cells_data["rotation"]
     #roi slices window into `uint8_labels`, so cv2 draws in place
-    roi = uint8_labels[row_off: row_off + raster_h,
-                 col_off: col_off + raster_w]
+    roi = uint8_labels[row_off: row_off + raster_shape[0],
+                 col_off: col_off + raster_shape[1]]
     #draw each ellipse in‑place
     for cell_id, (a, b), (center_x, center_y), angle_rot_numbers in zip(
         indices, shapes, locations, rotations

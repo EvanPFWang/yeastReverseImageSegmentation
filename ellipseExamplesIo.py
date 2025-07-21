@@ -199,13 +199,13 @@ def compare_mask_generation_methods() -> None:
 
 def complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
     """Run the full generate -> save -> visualise pipeline on a toy dataset."""
-    w, h = 128, 500
+    w, h = 128, 200
     cells_data = {
         "indices":       list(range(1, 10)),
         "fluorescence":  [100, 120, 80, 150, 90, 110, 130, 140, 95],
         "size":          [15, 18, 14, 20, 16, 17, 19, 18, 15],
-        "shape":         [(8, 7), (10, 9), (7, 7), (11, 10), (9, 8),
-                           (9, 9), (10, 8), (9, 9), (8, 7)],
+        "shape":         [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
+                           (9, 9), (11, 8), (78, 9), (18, 7)],
         "location":      [(30, 25), (30, 50), (40, 80), (60, 30),
                            (85, 70), (110, 25), (110, 85), (110, 110), (80, 110)],
         "rotation":      [0, 15, -20, 30, 0, 45, -10, 0, 25],

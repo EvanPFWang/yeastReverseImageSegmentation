@@ -1,13 +1,22 @@
 {
-  "width": 500,
+  "width": 200,
   "height": 128,
   "dtype": "uint8",
   "unique_labels": [
-    0
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
   ],
-  "max_label": 0,
+  "max_label": 9,
   "offset": [
-    774,
+    924,
     960
   ]
 }
