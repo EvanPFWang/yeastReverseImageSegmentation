@@ -1,5 +1,6 @@
 import imageio
 import numpy as np, seaborn as sns
+from numpy import ndarray
 from sklearn.cluster import MiniBatchKMeans
 from skimage.color import lab2rgb
 from skimage.draw import ellipse
@@ -54,8 +55,7 @@ functions living in the companion module (see `ellipse_params_to_general_form`,
 
 from  ellipseMath import (
     ellipse_params_to_general_form,
-    create_ellipse_mask_vectorized,
-    create_ellipse_mask_mathematical,
+    create_ellipse_mask_vectorized_perturbed,
     generate_uint8_labels,
     generate_uint8_labels_cv2,
 )
@@ -64,8 +64,8 @@ __all__ = [
     "save_uint8_labels",
     "load_uint8_labels",
     "visualize_uint8_labels",
-    "compare_mask_generation_methods",
-    "example_complete_pipeline",
+    #"compare_mask_generation_methods", removed
+    "complete_pipeline",
     "inspect_uint8_output",
     "generate_uint8_labels_cv2",
 ]
@@ -108,8 +108,8 @@ def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, base_filename:
 
     # 4 — simple metadata
     metadata: Dict[str, Any] = {
-        "width": int(uint8_labels.shape[1]),
-        "height": int(uint8_labels.shape[0]),
+        "width": dimensions[0],
+        "height": dimensions[1],
         "dtype": "uint8",
         "unique_labels": np.unique(uint8_labels).tolist(),
         "max_label": int(uint8_labels.max()),
@@ -136,19 +136,22 @@ lab =   rng.uniform([-55, -55, -55], [55, 55, 55], size=(5000, 3))
 k   =   MiniBatchKMeans(n).fit(lab)
 rgb =   np.clip(lab2rgb(k.cluster_centers_[None])[0], 0, 1)
 _DEFAULT_COLORS = (rgb * 255).astype(np.uint8)
+print(_DEFAULT_COLORS)
 
 def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict) -> np.ndarray:
     """Turn a label map into an RGB image using a lookup table.
     Extra labels beyond the length of the palette receive random colours.
     """
 
-    n,width,height   =   metadata["unique_labels"], metadata["width"], metadata["height"]
-
+    label_idx,width,height   =   metadata["unique_labels"], metadata["width"], metadata["height"]
+    n = len(label_idx)
     rng = np.random.default_rng(n)
     lab = rng.uniform([-55, -55, -55], [55, 55, 55], size=(5000, 3))
     k = MiniBatchKMeans(n).fit(lab)
     rgb = np.clip(lab2rgb(k.cluster_centers_[None])[0], 0, 1)
     colormap = (rgb * 255).astype(np.uint8)
+    print(colormap)
+
 
     if colormap is None:
         colormap = _DEFAULT_COLORS.copy()
@@ -166,6 +169,8 @@ def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict) -> np.
 # BENCHMARK / DEMO UTILITIES
 #                                                                           -
 
+#unnecessary after using theese to test ellipses
+"""
 def _mask_pair(w: int, h: int, center_x: float, center_y: float, a: float, b: float, angle: float):
     coeffs = ellipse_params_to_general_form(center_x, center_y, a, b, angle)
     mask_math = create_ellipse_mask_mathematical(w, h, coeffs)
@@ -174,7 +179,7 @@ def _mask_pair(w: int, h: int, center_x: float, center_y: float, a: float, b: fl
 
 
 def compare_mask_generation_methods() -> None:
-    """Benchmark pixel‑loop vs. vectorised mask generators for a single ellipse."""
+    Benchmark pixel‑loop vs. vectorised mask generators for a single ellipse.
 
     w, h = 128, 128
     center_x, center_y = 64, 64
@@ -187,27 +192,15 @@ def compare_mask_generation_methods() -> None:
 
     start = time.time()
     mask_math, mask_vec = _mask_pair(w, h, center_x, center_y, a, b, angle)
-    time_math = (time.time() - start) * 0.5  # first half for math
-    time_vec  = time_math                    # second half for vec (same run)
-
-    pixels_math = int(mask_math.sum())
-    pixels_vec  = int(mask_vec.sum())
-
-    print("\nMathematical (pixel‑loop) method:")
-    print(f"  Time: {time_math*1e3:.2f} ms | Pixels: {pixels_math}")
-
-    print("\nVectorised method:")
-    print(f"  Time: {time_vec*1e3:.2f} ms | Pixels: {pixels_vec}")
-    print(f"  Speedup: {time_math/time_vec if time_vec else float('inf'):.1f}×")
-
     identical = np.array_equal(mask_math, mask_vec)
     print(f"\nMasks identical: {identical}")
     if not identical:
         diff = int((mask_math ^ mask_vec).sum())
         print(f"  Differences: {diff} pixels")
 
+"""
 
-def example_complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
+def complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
     """Run the full generate -> save -> visualise pipeline on a toy dataset."""
     w, h = 128, 500
     cells_data = {
@@ -222,15 +215,16 @@ def example_complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
     }
 
     print("=== STEP 1: Generate canvas of uint8 labels ===")
-    uint8_labels,dimensions,    offset = generate_uint8_labels(w, h, cells_data)
+    uint8_labels,   dimensions,    offset = generate_uint8_labels(w, h, cells_data)
 
     print("\n=== STEP 2: Save uint8 labels ===")
-    save_uint8_labels(uint8_labels, dimensions, offset, "dump0\canvased_yeast_segmentation")
+    metadata    =   save_uint8_labels(uint8_labels, dimensions, offset, "dump0\canvased_yeast_segmentation")
     cropped_uint8_labels  =   canvas_slicer(uint8_labels, dimensions, offset)
+
     save_uint8_labels(cropped_uint8_labels, dimensions, offset, "dump0\cropped_yeast_segmentation")
 
     print("\n=== STEP 3: Visualise ===")
-    rgb_vis = visualize_uint8_labels(cropped_uint8_labels)
+    rgb_vis = visualize_uint8_labels(cropped_uint8_labels,metadata)
     imageio.imwrite("yeast_segmentation_visual.png", rgb_vis)
     print("Saved visualisation: yeast_segmentation_visual.png")
 
@@ -275,13 +269,14 @@ if __name__ == "__main__":
     print("Running quick smoke tests for ellipse I/O + visualisation module…\n")
 
     # 1. Benchmark mathematical vs. vectorised
-    compare_mask_generation_methods()
+#    compare_mask_generation_methods()
 
     # 2. Full pipeline on toy dataset
-    labels, rgb = example_complete_pipeline()
+    labels, rgb = complete_pipeline()
     inspect_uint8_output(labels)
     print("Demo RGB image saved as demo_labels_vis.png\n")
-
+    #no more need for cv2
+    """
     # 3. CV2 generator sanity check
     cv2_cells = {
         "indices": [1],
@@ -294,6 +289,7 @@ if __name__ == "__main__":
     print("OpenCV generator produced label with unique values:", np.unique(cv2_labels))
     inspect_uint8_output(cv2_labels)
     print("All tests completed successfully.")
+    """
 
 
 

@@ -1,6 +1,6 @@
 {
-  "width": 2048,
-  "height": 2048,
+  "width": 500,
+  "height": 128,
   "dtype": "uint8",
   "unique_labels": [
     0,
@@ -15,10 +15,6 @@
     9
   ],
   "max_label": 9,
-  "dimensions": [
-    500,
-    128
-  ],
   "offset": [
     774,
     960
