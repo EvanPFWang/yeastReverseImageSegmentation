@@ -129,13 +129,17 @@ def load_uint8_labels(filename: str, width: int, height: int) -> np.ndarray:
     flat_array = np.fromfile(filename, dtype=np.uint8)
     return flat_array.reshape((height, width))
 
+def n_spaced_rgb(n:int=9):
+    rng = np.random.default_rng(n)
+    lab = rng.uniform([0, -40, -40],  # L* ≥ 0
+                      [100, 40, 40],  # cut a*,b* to a sensible gamut‑like cube
+                      size=(5000, 3))
+    k = MiniBatchKMeans(n_clusters=n, batch_size=1536).fit(lab)
 
-n   =   9
-rng =   np.random.default_rng(n)
-lab =   rng.uniform([-55, -55, -55], [55, 55, 55], size=(5000, 3))
-k   =   MiniBatchKMeans(n).fit(lab)
-rgb =   np.clip(lab2rgb(k.cluster_centers_[None])[0], 0, 1)
-_DEFAULT_COLORS = (rgb * 255).astype(np.uint8)
+    # lab2rgb clips automatically when clip=True; no warning when input is valid
+    rgb = np.clip(lab2rgb(k.cluster_centers_[None])[0], 0.0, 1.0)
+    return  (rgb * 255).astype(np.uint8)
+_DEFAULT_COLORS = n_spaced_rgb()
 print(_DEFAULT_COLORS)
 
 def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict) -> np.ndarray:
@@ -144,14 +148,7 @@ def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict) -> np.
     """
 
     label_idx,width,height   =   metadata["unique_labels"], metadata["width"], metadata["height"]
-    n = len(label_idx)
-    rng = np.random.default_rng(n)
-    lab = rng.uniform([-55, -55, -55], [55, 55, 55], size=(5000, 3))
-    k = MiniBatchKMeans(n).fit(lab)
-    rgb = np.clip(lab2rgb(k.cluster_centers_[None])[0], 0, 1)
-    colormap = (rgb * 255).astype(np.uint8)
-    print(colormap)
-
+    colormap = n_spaced_rgb(len(label_idx))
 
     if colormap is None:
         colormap = _DEFAULT_COLORS.copy()
@@ -239,7 +236,6 @@ def canvas_slicer(canvas:   np.ndarray,dimensions:tuple,offset) -> np.ndarray:
 
 def inspect_uint8_output(uint8_labels: np.ndarray) -> None:
     """Pretty‑print basic stats and a small patch of a label image."""
-
     print("=== Uint8 Label Array Inspection ===")
     print(f"Shape        : {uint8_labels.shape}")
     print(f"Data type    : {uint8_labels.dtype}")

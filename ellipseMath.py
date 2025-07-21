@@ -2,7 +2,6 @@ import imageio
 import time
 import imageio.v2 as imageio  #imageio‑v3 friendly import
 import numpy as np
-from Demos.mmapfile_demo import offset
 from typing import Tuple, Dict, Any
 
 from skimage.draw import ellipse
@@ -71,6 +70,7 @@ def ellipse_params_to_general_form(center_x: float,
         raise ValueError("semi_a and semi_b must be positive")
 
     #
+    #
     semi_a   = np.float32(semi_a)
     semi_b   = np.float32(semi_b)
     center_x = np.float32(center_x)
@@ -84,12 +84,11 @@ def ellipse_params_to_general_form(center_x: float,
         r      = np.float32(0.5) * (semi_a + semi_b)
         inv_r2 = np.float32(1.0) / (r * r)
         return {
-            "a":np.float32(1.0) / (r),
-            "b":np.float32(1.0) / (r),
+            "semi_a":r,
+            "semi_b":r,
             "A": inv_r2,  #A
             "B": inv_r2,  #C (equal for a circle)
             "C": np.float32(0.0),  #B
-            "D": np.float32(1.0),
             "k": center_x,
             "l": center_y,
         }
@@ -135,13 +134,12 @@ def ellipse_params_to_general_form(center_x: float,
     C     /= scale2
 
     return {
-        "a": np.float32(a_hat/scale),   #semi-axis lengths since having to recalculate these in my mask
+        "semi_a": np.float32(semi_a),   #semi-axis lengths since having to recalculate these in my mask
                                         #masker causes immersion error from sqrt() truncation
-        "b": np.float32(b_hat/scale),
+        "semi_b": np.float32(semi_b),
         "A": A,
         "C": C,
         "B": B,
-        "D": np.float32(1.0),
         "k": center_x,
         "l": center_y,
     }
@@ -186,7 +184,7 @@ uint8_labels : np.ndarray, shape ``(h, w)``, dtype ``np.uint8``
 
 def _implicit_value(A: float, B: float, C: float, dx, dy):
     #compute A*dx² + C*dy² + B*dx*dy element‑wise (broadcast friendly)
-    return A * dx * dx + B * dy * dy + C * dx * dy
+    return A * dx * dx + B * dy * dy + C * dx * dy #<=D but D is assumed to be 1
 def center_offset(canvas_shape: Tuple, raster_shape:    Tuple):
     """
     Return offset to place the raster centre at the centre of the canvas.
@@ -222,39 +220,50 @@ def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
     As `create_ellipse_mask_vectorized`, but boundary is perturbed by Perlin
     noise.  `jitter` ≈ relative amplitude; `noise_scale` controls feature size.
     """
-
+    #2048x2048
     #r(θ) = ab / sqrt((b cosθ)^2 + (a sinθ)^2)
-    rng = np.random.default_rng(seed)#       Recover    pixel    semi‑axes    from implicit coefficients
-    a,  b = coeffs["a"], coeffs["b"]
-    offset_row, offset_col = offset[0], offset[1]
-    center_x, center_y = coeffs["k"], coeffs["l"]
+#    rng = np.random.default_rng(seed)#       Recover    pixel    semi‑axes
+    semi_a,  semi_b = coeffs["semi_a"], coeffs["semi_b"]
+    xSqr_coeff  =   coeffs["A"]
+    ySqr_coeff = coeffs["B"]
+
+
+    #offset_row, offset_col = offset[0], offset[1]
+    center_x, center_y = coeffs["k"]+row_offset, col_offset+coeffs["l"]
     #h is height and w is width so coordinate grids
 
 
     eps =   np.finfo(np.float32).eps
-    scale   =   max(a,b)
-    a32_hat,    b32_hat =   a/scale,    b/scale
-    y, x = np.ogrid[offset_row:offset_row+h, offset_col:offset_col+w]
-    dx, dy = x - center_x, y - center_y
-    r_px = np.hypot(dx, dy)
-    theta = np.arctan2(dy, dx)
+    scale   =   max(semi_a,semi_b)
+    a32_hat,    b32_hat =   semi_a/scale,    semi_b/scale
+    y_grid, x_grid = np.ogrid[:h, :w]
+    #
+    
+    yy, xx = np.indices((2048, 2048))
+
+    dx, dy = xx - center_x, yy - center_y
+    theta = np.arctan2(dy, dx,  dtype=np.float32)
 
     # Ideal ellipse radius for every pixel direction
     #r_ideal = (a * b) / np.sqrt((b * np.cos(theta)) ** 2 +
     #                            (a * np.sin(theta)) ** 2)
-
+    #scale gets taken out so all we deal with are the hats
     #fix with
     denom = np.hypot(b32_hat*np.cos(theta), a32_hat*np.sin(theta))
     r_ideal =   (a32_hat * b32_hat) /   denom*scale
-
     # 2‑D Perlin noise field ∈ [‑1,1]
-    n = np.vectorize(lambda yy, xx:
-                     pnoise2(xx / noise_scale, yy / noise_scale,
-                             repeatx=w, repeaty=h, base=seed or 0))
-    delta = jitter * n(*np.indices((h, w)))
 
-    return r_px <= r_ideal * (1.0 + delta) #to keep label pixels lying on the actual boundary
 
+    noise = np.clip(np.vectorize(lambda y0, x0: pnoise2(x0/noise_scale,
+                                                     y0/noise_scale,
+                                                     repeatx=w, repeaty=h,
+                                                     base=seed or 0),
+                               otypes=[np.float32])(yy, xx),
+                  -1.0, 1.0)
+    delta = jitter * noise
+    r_px = np.hypot(dx, dy)
+    return r_px <= r_ideal * (1.0 + delta   +   eps) #to keep label pixels lying on the actual boundary
+    #returns bool mask as labels for this cell over whole 2048
 
 
 def generate_uint8_labels(w: int, h: int, cells_data: dict,
@@ -284,7 +293,8 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
         if cell_id > 255:
             raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
         coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
-        cell_msk = mask_fn(raster_shape[0], raster_shape[1], coeffs)
+        cell_msk = mask_fn(raster_shape[0], raster_shape[1], coeffs)[row_off: row_off + raster_shape[1],
+          col_off: col_off + raster_shape[0]]
         roi[cell_msk] = cell_id
         #draw all cells on canvas
     return uint8_labels,    raster_shape,   (row_off, col_off)
@@ -365,10 +375,8 @@ if __name__ == "__main__":
     coeffs = ellipse_params_to_general_form(center_x, center_y,
                                            semi_a, semi_b, theta_deg)
 
-    offset  =   center_offset((2048, 2048), (512,512))
-    mask_vec = create_ellipse_mask_vectorized_perturbed(W, H, coeffs,
-                                                        0.08,29
-                                                        ,   offset, max(W,H)%min(W,H))
+    row_offset, col_offset =   center_offset((2048, 2048), (512,512))
+    mask_vec = create_ellipse_mask_vectorized_perturbed(W, H, coeffs,0.08,29, (row_offset, col_offset), max(W,H)%min(W,H))
 
 
 
