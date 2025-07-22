@@ -31,13 +31,22 @@ from scipy import ndimage                                     #PSF blur
 from perlin_numpy import generate_perlin_noise_2d             #Perlin
 
 import ellipseMath, ellipseExamplesIo
-from ellipseMath import (_fit_periods,
-                         ellipse_params_to_general_form,
-                         create_ellipse_mask_vectorized_perturbed2,
-                         center_offset)
-from ellipseExamplesIo import visualize_uint8_labels, canvas_slicer
+from ellipseMath import     (_fit_periods,
+                            ellipse_params_to_general_form,
+                            create_ellipse_mask_vectorized_perturbed2,
+                             center_offset)
+from ellipseExamplesIo import   (visualize_uint8_labels,
+                                save_uint8_labels,
+                                n_spaced_lab,
+                                order_for_gradient,
+                                gradient_palette,
+                                colormap_for_cells,
+                                palette_to_strip,
+                                colormap_for_cells,
+                                canvas_slicer)
 
 
+_FALSE_YELLOW   =   tuple(int("#CFCF00".lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
 
 notebook_directory = os.getcwd()
 
@@ -91,9 +100,7 @@ def add_bud_random_rotation(parent_center, parent_axes, *,
 
 
 
-#-------------------------------------------------------------------------
-# Helper 2 ─ rotated, Perlin‑jittered ellipse mask *vectorised*
-#-------------------------------------------------------------------------
+
 def ellipse_mask_rot_jitter(h, w, center, axes, angle_deg: float,
                             *, jitter=0.05, noise_scale=64,
                             seed=None, repeat=True):
@@ -136,15 +143,6 @@ def ellipse_mask_rot_jitter(h, w, center, axes, angle_deg: float,
 
 
 
-
-
-
-
-from ellipseMath import (
-    ellipse_params_to_general_form,
-    create_ellipse_mask_vectorized_perturbed2,    #existing mother generator
-    center_offset
-)
 
 #small injector: optionally spawn a bud for each parent cell
 def _maybe_add_bud(parent_mask, parent_center, parent_axes, *,
@@ -200,11 +198,9 @@ mask_bool = create_ellipse_mask_vectorized_perturbed(
                 seed=42)             #reproducible masks
 labels[mask_bool] = cell_id"""
 
-from scipy import ndimage
 
-def render_fluor_image(label_map: np.ndarray, center:tuple,
-                       *, sigma_px=1.2, bitdepth=16,
-                       gamma=0.7, rng=None):
+def render_fluor_image(label_map: np.ndarray,*, sigma_px=1.2,
+                       bitdepth=16, gamma=0.7, rng=None):
     """Return uint16 synthetic fluorescence image I₀."""
     rng = rng or np.random.default_rng()
     img_f = np.zeros_like(label_map, dtype=np.float32)
@@ -235,7 +231,7 @@ def render_fluor_image(label_map: np.ndarray, center:tuple,
                                            jitter=0.03,
                                            noise_scale=64,
                                            repeat=True,
-                                           rng=rng)
+                                           seed=rng)
         img_f[nuc_mask] *= rng.uniform(0.4, 0.6)
 
     #---- optics + noise ----
@@ -270,7 +266,7 @@ def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.4):
                                             cells_data["rotation"]):
         coeffs = ellipse_params_to_general_form(center_x, center_y, a, b, angle)
         parent = create_ellipse_mask_vectorized_perturbed2(
-            w, h, coeffs, 0.07, 64, (row_off, col_off))
+            w, h, coeffs, 0.7, 39, (row_off, col_off))
         parent = _maybe_add_bud(parent, (center_y, center_x), (a, b),
                                 rng=rng, prob=bud_prob)
         labels[parent] = cid
@@ -286,18 +282,24 @@ def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
                                   seed=rng.integers(1<<31))
     return parent_mask | (bud & ~parent_mask)
 
+def crop_box(img,dimensions,offset):
+    """    Crop a TIFF to a box    """
+    h_img, w_img,box_h,box_w,row_off,col_off \
+        = 2048, 2048,  dimensions[0], dimensions[1], offset[0], offset[1]
+    cropped = img[row_off : row_off + box_h, col_off : col_off + box_w]
 
-def false_yellow_overlay(I16: np.ndarray, *, bitdepth=16) -> np.ndarray:
+    # Preserve original metadata & bit depth
+    return cropped
+def false_yellow_overlay(I16: np.ndarray, *, bitdepth=16,   gain=4.0) -> np.ndarray:
     """
     map uint16 fluorescence frame to false-yellow RGB (0xCFCF00).
     black background stays black
     """
-    I_norm = I16.astype(np.float32) / (2**bitdepth - 1)        # 0–1
-    Y      = np.clip(I_norm, 0, 1)[..., None]                  # (H,W,1)
-    rgb_y  = np.array([207, 207, 0], dtype=np.float32) / 255.  # CFCF00
-    rgb    = (Y * rgb_y).astype(np.float32)
-    return rgb
-#--------------------------------------------------------------------
+    I_norm = I16.astype(np.float32) / (2 ** bitdepth - 1)  #0–1
+    I_norm = np.clip(I_norm * gain, 0, 1)  #boost & clip
+    rgb_y = np.array([207, 207, 0], dtype=np.float32) / 255.
+    return (I_norm[..., None] * rgb_y).astype(np.uint8)
+
 if __name__ == "__main__":
     t0 = time.time()
     w,h = 128,200
@@ -308,27 +310,54 @@ if __name__ == "__main__":
         "shape": [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
                   (9, 9), (11, 8), (45, 9), (18, 7)],
         "location": [(30, 25), (30, 50), (40, 80), (60, 30),
-                     (85, 70), (110, 25), (110, 85), (110, 110), (80, 110)],
+                     (85, 70), (110, 223), (110, 85), (110, 110), (80, 110)],
         "rotation": [0, 15, -20, 30, 0, 45, -10, 0, 25],
     }
 
-    mask = generate_uint8_labels_with_buds(W, H, toy, rng=rng,
+    mask                    = generate_uint8_labels_with_buds(w, h, toy, rng=rng,
                                            bud_prob=BUD_PROB)
-    I0   = render_fluor_image(mask, sigma_px=SIGMA_PSF, center=center_offset((2048,2048),(w,h)),
+    row_offset,col_offset   = center_offset((2048, 2048), (h, w))
+    centered_start          =   (row_offset, col_offset)
+    I0                      = render_fluor_image(mask, sigma_px=SIGMA_PSF,
                               bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
+    cropped_uint8_labels    = canvas_slicer(mask, (h, w), (row_offset, col_offset))
+    cropped_IO              =  crop_box(I0,(h,w),centered_start)
+
+    #save uncropped and uncropped masks
+
+    IO_metadata         =    save_uint8_labels(mask, (h,w), centered_start,"dump0\mask_tester_mask")
+    cropped_IO_metadata =   save_uint8_labels(cropped_uint8_labels, (h,w), centered_start,"dump0\cropped_tester_mask")
 
     #save raw uint16 + false-yellow PNG
-    imageio.imwrite("demo_fluor.tiff", I0)                     # training
-    vis_y = (false_yellow_overlay(I0) * 255).astype(np.uint8)  # display
-    imageio.imwrite("vis_yellow.png", vis_y)
+    imageio.imwrite("demo_fluor.tiff", cropped_IO)                     # training
+
+    fluors = np.array(cropped_IO_metadata["fluorescence"], dtype=np.float32)
+    min_adu, max_adu = fluors.min(), fluors.max()
+
+    # define a stretch & false‑yellow function in this scope:
+    def false_yellow_ADU(I16, *, min_adu, max_adu, gamma=0.7):
+        """
+        Linearly stretch I16 from [min_adu..max_adu] → [0..1],
+        apply optional gamma, then false‑color into 0xCFCF00.
+        """
+        I = I16.astype(np.float32)
+        I_norm = (I - min_adu) / (max_adu - min_adu)
+        I_norm = np.clip(I_norm, 0, 1)
+        # optional gamma‑correction (brighten central cores)
+        I_norm = I_norm ** (1 / gamma) if gamma != 1.0 else I_norm
 
 
-    vis_rgb = visualize_uint8_labels(canvas_slicer(mask,(128,200)),
-                {"unique_labels":range(1,10),"width":w,"height":h}, None)
+
+    vis_yellow = (false_yellow_overlay(cropped_IO) * 255).astype(np.uint8)  # display
+    imageio.imwrite("vis_yellow.png", vis_yellow)
+
+
+
+    vis_rgb = visualize_uint8_labels(cropped_uint8_labels,cropped_IO_metadata,None)
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].imshow(vis_rgb) ;          ax[0].set_title("Label RGB") ; ax[0].axis("off")
-    ax[1].imshow(vis_y)   ;          ax[1].set_title("False-Yellow I₀") ; ax[1].axis("off")
+    ax[1].imshow(vis_yellow)   ;          ax[1].set_title("False-Yellow I₀") ; ax[1].axis("off")
     plt.tight_layout() ; plt.show()
 
     print(f"Saved demo_fluor.tiff (uint16) and vis_yellow.png – "

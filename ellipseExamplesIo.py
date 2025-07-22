@@ -39,7 +39,7 @@ import os
 import json
 import time
 from typing import Tuple, Dict, Any
-
+from    skimage.color   import deltaE_ciede2000
 import cv2
 import imageio
 import numpy as np
@@ -149,10 +149,13 @@ def n_spaced_lab(n:int=9):
 def order_for_gradient(lab):
     """Return an index array giving a ΔE‑smoothed order."""
     # PCA
+    n = lab.shape[0]
+    if n < 2:   #trivial
+        return np.arange(n, dtype=int)
+
     pc1 = PCA(n_components=1).fit_transform(lab).ravel()
     order = np.argsort(pc1)
     # ΔE check
-    from skimage.color import deltaE_ciede2000
     lab_sorted = lab[order]
     if (deltaE_ciede2000(lab_sorted[:-1], lab_sorted[1:]).max() > 25):
         order = np.argsort(lab[:,0])   # fallback: by lightness
@@ -208,19 +211,22 @@ def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict,colorma
     """Turn a label map into an RGB image using a lookup table.
     Extra labels beyond the length of the palette receive random colours.
     """
-
-    label_idx,width,height   =   metadata["unique_labels"], metadata["width"], metadata["height"]
-
     if colormap is None:
-        colormap = _DEFAULT_COLORMAP.copy()
+        #ASSUME LABELS ARE FROM 1 to N
+        label_idx       =   np.array(metadata["unique_labels"], dtype=int)
+        color_idx       = np.concatenate(([0], label_idx))    #build a full-length colormap of shape (max_label+1, 3)
+        base_colormap   = colormap_for_cells(color_idx)
 
+        max_label       = int(uint8_labels.max())
+        needed = max_label + 1 - base_colormap.shape[0]
 
-    max_label = int(uint8_labels.max())
-    if max_label >= len(colormap):
-        n_extra = max_label + 1 - len(colormap)
-        extra = np.random.randint(50, 256, (n_extra, 3), dtype=np.uint8)
-        colormap = np.vstack([colormap, extra])
-
+        if needed > 0:
+            # add random extras so that base_cmap has enough rows
+            extra = np.random.randint(50, 256, (needed, 3), dtype=np.uint8)
+            colormap = np.vstack([base_colormap, extra])
+        else:
+            colormap = base_colormap
+    # now safe to index
     return colormap[uint8_labels]
 
 
