@@ -2,14 +2,16 @@ import imageio
 import imageio.v2 as iio2  #imageio‑v3 friendly import
 import imageio.v3 as iio3
 
+from sklearn.decomposition import PCA
 import numpy as np, seaborn as sns
 from cv2.detail import strip
 from numpy import ndarray
 from sklearn.cluster import MiniBatchKMeans
-from skimage.color import lab2rgb
+from skimage.color import lab2rgb,  deltaE_ciede2000
+
 from skimage.draw import ellipse
 
-
+from typing import List
 
 import os
 import cv2
@@ -133,7 +135,7 @@ def load_uint8_labels(filename: str, width: int, height: int) -> np.ndarray:
     flat_array = np.fromfile(filename, dtype=np.uint8)
     return flat_array.reshape((height, width))
 
-def n_spaced_rgb(n:int=9):
+def n_spaced_lab(n:int=9):
     """
     Generate perceptually spaced cluster centers in array of shape (n_clusters,3) with Lab coords
     """
@@ -142,28 +144,44 @@ def n_spaced_rgb(n:int=9):
                       [100, 40, 40],  # cut a*,b* to a sensible gamut‑like cube
                       size=(5000, 3))
     k = MiniBatchKMeans(n_clusters=n, batch_size=1536).fit(lab)
+    return k.cluster_centers_.astype(np.float32)
 
-    # lab2rgb clips automatically when clip=True; no warning when input is valid
-    rgb = np.clip(lab2rgb(k.cluster_centers_[None])[0], 0.0, 1.0)
-    return  (rgb * 255).astype(np.uint8)
-def order_by_nearest_neighbor(colors: np.ndarray, start_color: np.ndarray) -> List[np.ndarray]:
-    """
-    Given an array of colors (m,3) and a start_color (3,),
-    return a list of those colors ordered by greedily picking
-    the nearest next color in RGB‐Euclidean space.
-    """
-    remaining = [tuple(c) for c in colors]
-    current = tuple(start_color)
-    ordered = []
-    while remaining:
-        # find nearest
-        dists = [np.linalg.norm(np.array(c) - np.array(current)) for c in remaining]
-        idx = int(np.argmin(dists))
-        ordered.append(np.array(remaining.pop(idx), dtype=np.uint8))
-        current = tuple(ordered[-1])
-    return ordered
-_DEFAULT_COLORS = n_spaced_rgb()
-print(_DEFAULT_COLORS)
+def order_for_gradient(lab):
+    """Return an index array giving a ΔE‑smoothed order."""
+    # PCA
+    pc1 = PCA(n_components=1).fit_transform(lab).ravel()
+    order = np.argsort(pc1)
+    # ΔE check
+    from skimage.color import deltaE_ciede2000
+    lab_sorted = lab[order]
+    if (deltaE_ciede2000(lab_sorted[:-1], lab_sorted[1:]).max() > 25):
+        order = np.argsort(lab[:,0])   # fallback: by lightness
+    return order
+def gradient_palette(n_colors, background_dark=True):
+    lab = n_spaced_lab(n_colors)
+    idx = order_for_gradient(lab)
+    if background_dark:
+        idx = idx[np.argsort(lab[idx,0])]      # ascending L*: darkest first
+    ordered_lab = lab[idx]
+    rgb_u8 = np.clip(lab2rgb(ordered_lab[None])[0] * 255, 0, 255).astype(np.uint8)
+    return rgb_u8                              #
+def palette_to_strip(rgb_u8, h, thickness=10, out_file="palette.png"):
+    anchors = np.linspace(0, h-1, len(rgb_u8), dtype=np.float32)
+    base    = np.arange(h, dtype=np.float32)
+    col     = np.empty((h, 1, 3), dtype=np.uint8)
+    print("HARU URARA HORSE")
+    for ch in range(3):
+        col[:,0,ch] = np.interp(base, anchors, rgb_u8[:,ch]).round()
+    img = np.tile(col, (1, thickness, 1))
+    imageio.v3.imwrite(out_file, img)
+    return img
+
+def colormap_for_cells(unique_cell_ids):#Default 0-(9+1)
+    n = unique_cell_ids.max()         #assumes labels 1…n
+    print(unique_cell_ids)
+    palette = gradient_palette(n+1)   # returns n+1 rows
+    print(palette)
+    return palette[unique_cell_ids]
 
 def palette_to_strip(rgb_float, h,thickness,
                    out_file="palette.png"):
@@ -171,6 +189,7 @@ def palette_to_strip(rgb_float, h,thickness,
     rgb_float : (n,3) array in 0-255 *float*
     h         : image height in pixels
     """
+    print("HORSSSEEEEEE")
     rgb_u8 = np.clip(np.round(rgb_float), 0, 255).astype(np.uint8)
     anchors = np.linspace(0, h - 1, len(rgb_float), dtype=np.float32)
     base = np.arange(h, dtype=np.float32)
@@ -185,18 +204,22 @@ def palette_to_strip(rgb_float, h,thickness,
     iio3.imwrite(out_file, img)
 
     return img
-thickness=10
-strip   =   palette_to_strip(_DEFAULT_COLORS,200,thickness)
-def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict) -> np.ndarray:
+def colormap_for_cells(unique_labels):
+    n = unique_labels.max()+1        # assumes labels 1…n, 0=background
+    palette = gradient_palette(n)   # returns n+1 rows
+    return palette[unique_labels]   # broadcast lookup
+
+
+def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict,colormap:  Dict) -> np.ndarray:
     """Turn a label map into an RGB image using a lookup table.
     Extra labels beyond the length of the palette receive random colours.
     """
 
     label_idx,width,height   =   metadata["unique_labels"], metadata["width"], metadata["height"]
-    colormap = n_spaced_rgb(len(label_idx))
 
     if colormap is None:
-        colormap = _DEFAULT_COLORS.copy()
+        colormap = _DEFAULT_COLORMAP.copy()
+
 
     max_label = int(uint8_labels.max())
     if max_label >= len(colormap):
@@ -242,19 +265,20 @@ def compare_mask_generation_methods() -> None:
 
 """
 
-def complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
+def complete_pipeline(cells_data:    Dict) -> Tuple[np.ndarray, np.ndarray]:
     """Run the full generate -> save -> visualise pipeline on a toy dataset."""
     w, h = 128, 200
-    cells_data = {
-        "indices":       list(range(1, 10)),
-        "fluorescence":  [100, 120, 80, 150, 90, 110, 130, 140, 95],
-        "size":          [15, 18, 14, 20, 16, 17, 19, 18, 15],
-        "shape":         [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
-                           (9, 9), (11, 8), (45, 9), (18, 7)],
-        "location":      [(30, 25), (30, 50), (40, 80), (60, 30),
-                           (85, 70), (110, 25), (110, 85), (110, 110), (80, 110)],
-        "rotation":      [0, 15, -20, 30, 0, 45, -10, 0, 25],
-    }
+    if  cells_data is None:
+        cells_data = {
+            "indices":       list(range(1, 10)),
+            "fluorescence":  [100, 120, 80, 150, 90, 110, 130, 140, 95],
+            "size":          [15, 18, 14, 20, 16, 17, 19, 18, 15],
+            "shape":         [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
+                               (9, 9), (11, 8), (45, 9), (18, 7)],
+            "location":      [(30, 25), (30, 50), (40, 80), (60, 30),
+                               (85, 70), (110, 25), (110, 85), (110, 110), (80, 110)],
+            "rotation":      [0, 15, -20, 30, 0, 45, -10, 0, 25],
+        }
 
     print("=== STEP 1: Generate canvas of uint8 labels ===")
     uint8_labels,   dimensions,    offset = generate_uint8_labels(w, h, cells_data)
@@ -265,8 +289,14 @@ def complete_pipeline() -> Tuple[np.ndarray, np.ndarray]:
 
     save_uint8_labels(cropped_uint8_labels, dimensions, offset, "dump0\cropped_yeast_segmentation")
 
-    print("\n=== STEP 3: Visualise ===")
-    rgb_vis = visualize_uint8_labels(cropped_uint8_labels,metadata)
+    print("\n=== STEP 3: Define and order colorMap to cells ===")
+    thickness   =   10
+    cells = np.array(range(0, len(cells_data["indices"]) + 1), dtype=np.uint8)
+    colormap    =   colormap_for_cells(cells)
+    strip = palette_to_strip(colormap, 200, thickness)
+
+    print("\n=== STEP 4: Visualise ===")
+    rgb_vis = visualize_uint8_labels(cropped_uint8_labels,metadata,colormap)
     imageio.imwrite("yeast_segmentation_visual.png", rgb_vis)
     print("Saved visualisation: yeast_segmentation_visual.png")
 
@@ -313,7 +343,7 @@ if __name__ == "__main__":
 #    compare_mask_generation_methods()
 
     # 2. Full pipeline on toy dataset
-    labels, rgb = complete_pipeline()
+    labels, rgb = complete_pipeline(None)
     inspect_uint8_output(labels)
     print("Demo RGB image saved as demo_labels_vis.png\n")
     #no more need for cv2

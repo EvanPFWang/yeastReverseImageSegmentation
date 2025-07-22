@@ -329,7 +329,7 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
             raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
         coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
         cell_msk = mask_fn(raster_shape[1], raster_shape[0], \
-                           coeffs,0.15,64,\
+                           coeffs,0.85,790,\
                            [row_off,col_off])\
             [row_off:row_off+h,col_off:col_off+w]
         print(np.sum(1*cell_msk))
