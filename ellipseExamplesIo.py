@@ -165,16 +165,6 @@ def gradient_palette(n_colors, background_dark=True):
     ordered_lab = lab[idx]
     rgb_u8 = np.clip(lab2rgb(ordered_lab[None])[0] * 255, 0, 255).astype(np.uint8)
     return rgb_u8                              #
-def palette_to_strip(rgb_u8, h, thickness=10, out_file="palette.png"):
-    anchors = np.linspace(0, h-1, len(rgb_u8), dtype=np.float32)
-    base    = np.arange(h, dtype=np.float32)
-    col     = np.empty((h, 1, 3), dtype=np.uint8)
-    print("HARU URARA HORSE")
-    for ch in range(3):
-        col[:,0,ch] = np.interp(base, anchors, rgb_u8[:,ch]).round()
-    img = np.tile(col, (1, thickness, 1))
-    imageio.v3.imwrite(out_file, img)
-    return img
 
 def colormap_for_cells(unique_cell_ids):#Default 0-(9+1)
     n = unique_cell_ids.max()         #assumes labels 1…n
@@ -186,30 +176,34 @@ def colormap_for_cells(unique_cell_ids):#Default 0-(9+1)
 def palette_to_strip(rgb_float, h,thickness,
                    out_file="palette.png"):
     """
-    rgb_float : (n,3) array in 0-255 *float*
-    h         : image height in pixels
+    rgb_float   : (n,3) array in 0-255 *float*
+    h           : image height in pixels
+    thickness   : width in pixels of the strip
     """
     print("HORSSSEEEEEE")
     rgb_u8 = np.clip(np.round(rgb_float), 0, 255).astype(np.uint8)
+
+    #generate interpolation anchors
     anchors = np.linspace(0, h - 1, len(rgb_float), dtype=np.float32)
     base = np.arange(h, dtype=np.float32)
+
     #build a 1-pixel-wide column, then widen
     col = np.empty((h, 1, 3), dtype=np.uint8)
     for ch in range(3):  # R, G, B channels
         col[:, 0, ch] = np.interp(base, anchors, rgb_u8[:, ch]).round().astype(
             np.uint8)
-
-    img = np.tile(col, (1, thickness, 1))
-
+    #tile to desired thickness - i had it upside down so flip it vertically - then save
+    img = np.flipud(np.tile(col, (1, thickness, 1)))
     iio3.imwrite(out_file, img)
-
     return img
 def colormap_for_cells(unique_labels):
     n = unique_labels.max()+1        # assumes labels 1…n, 0=background
     palette = gradient_palette(n)   # returns n+1 rows
     return palette[unique_labels]   # broadcast lookup
 
-
+_DEFAULT_CELL_IDS   =   np.array(range(0,9+1),  np.uint8)
+_DEFAULT_COLORMAP    =   colormap_for_cells(_DEFAULT_CELL_IDS)
+_FALSE_YELLOW   =   tuple(int("#CFCF00".lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
 def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict,colormap:  Dict) -> np.ndarray:
     """Turn a label map into an RGB image using a lookup table.
     Extra labels beyond the length of the palette receive random colours.

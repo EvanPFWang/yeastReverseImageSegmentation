@@ -240,7 +240,7 @@ def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
     print(np.sum(r_px <= scale))
     #return r_px <= scale
     return r_px <= r_ideal * (1.0 + delta   +   eps) #to keep label pixels lying on the actual boundary
-    #returns bool mask as labels for this cell over whole 2048
+    #returns bool mask as labels for this cell over whole 2048"""
 
 def _fit_periods(dim: int, approx_cell: int) -> int:
     """
@@ -329,10 +329,10 @@ def generate_uint8_labels(w: int, h: int, cells_data: dict,
             raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
         coeffs   = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
         cell_msk = mask_fn(raster_shape[1], raster_shape[0], \
-                           coeffs,0.85,790,\
+                           coeffs,0.7,39,\
                            [row_off,col_off])\
             [row_off:row_off+h,col_off:col_off+w]
-        print(np.sum(1*cell_msk))
+        print(f"COUNT BOOL VALUES IN MASK {cell_id}:   {np.sum(1*cell_msk)}")
         roi[cell_msk] = cell_id
         #draw all cells on canvas
     return uint8_labels,    raster_shape,   (row_off, col_off)
