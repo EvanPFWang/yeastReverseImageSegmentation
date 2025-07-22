@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt, numpy as np
 
 import time, matplotlib.pyplot as plt
 from numpy.random import default_rng
+import tifffile
 from scipy import ndimage                                     #PSF blur
 from perlin_numpy import generate_perlin_noise_2d             #Perlin
 
@@ -55,7 +56,7 @@ from numpy.random import default_rng
 rng_global = default_rng()
 
 #-------------------------------------------------------------------------
-# Helper 1 ─ choose where & how the bud attaches
+#Helper 1 ─ choose where & how the bud attaches
 #-------------------------------------------------------------------------
 def add_bud_random_rotation(parent_center, parent_axes, *,
                              bud_ratio: float = 0.6,
@@ -199,18 +200,60 @@ mask_bool = create_ellipse_mask_vectorized_perturbed(
 labels[mask_bool] = cell_id"""
 
 
-def render_fluor_image(label_map: np.ndarray,*, sigma_px=1.2,
-                       bitdepth=16, gamma=0.7, rng=None):
-    """Return uint16 synthetic fluorescence image I₀."""
-    rng = rng or np.random.default_rng()
+def render_fluor_image(label_map: np.ndarray,   metadata: dict, *,
+                       sigma_px=1.2,    bitdepth=16, gamma=0.7, rng=None):
+    """
+    Parameters
+    ----------
+    label_map : (H,W) uint8
+        Each pixel’s integer cell ID (0 = background).
+    metadata : dict
+        Must contain `"fluorescence"`: a list or array of length N_cells
+        giving the raw per‑cell ADU values.
+    sigma_px : float
+        Gaussian PSF blur radius in pixels.
+    bitdepth : int
+        Target bit depth (e.g. 16 for uint16 final).
+    gamma : float
+        Exponent for radial fall‑off shaping."""
     img_f = np.zeros_like(label_map, dtype=np.float32)
+    fluors = np.asarray(metadata["fluorescence"], dtype=np.float32)
 
-    # per-cell gradient + nucleolus
+    #optional: normalize to [0…1] so that the brightest cell -> 1.0
+    fluors /= fluors.max()
+
+
+
+    #per-cell gradient + nucleolus
     for cid in np.unique(label_map):
         if cid == 0:          #background
             continue
         mask = label_map == cid
 
+        #per‑cell base ADU fraction [0..1]
+        F0 = fluors[cid - 1]
+
+        #cell mask
+        mask = (label_map == cid)
+        yy, xx = np.nonzero(mask)
+
+        #compute distance from cell center
+        cy, cx = np.median(yy), np.median(xx)
+        rr      = np.sqrt((yy - cy)**2 + (xx - cx)**2)
+        r_max   = rr.max() + 1e-6
+
+        #radial profile under gamma
+        img_f[yy, xx] = F0 * (1.0 - (rr / r_max)**gamma)
+
+        #dark nucleolus (30% radius) with strong center dimming
+        nuc_radius   = 0.3 * r_max
+        nuc_inds     = (rr <= nuc_radius)
+        #linearly ramp from dark_strength at center → 1.0 at edge
+        dark_strength = 0.1
+        ramp = rr[nuc_inds] / nuc_radius
+        dark_factor = dark_strength + (1 - dark_strength) * ramp
+        img_f[yy[nuc_inds], xx[nuc_inds]] *= dark_factor
+        """
         #cell centre & max radius
         yy, xx = np.where(mask)
         center_y, center_x = np.median(yy), np.median(xx)
@@ -232,17 +275,29 @@ def render_fluor_image(label_map: np.ndarray,*, sigma_px=1.2,
                                            noise_scale=64,
                                            repeat=True,
                                            seed=rng)
-        img_f[nuc_mask] *= rng.uniform(0.4, 0.6)
-
-    #---- optics + noise ----
+        img_f[nuc_mask] *= rng.uniform(0.4, 0.6)"""
+    #optics blur
     img_f = ndimage.gaussian_filter(img_f, sigma_px)
+
+    #scale into photo‑electron counts → Poisson + read noise
+    rng = np.random.default_rng()
+    counts = img_f * (2**bitdepth - 1)
+    counts = rng.poisson(counts)
+    counts = counts + rng.normal(0, 50, size=counts.shape)
+
+    #clamp & cast
+    counts = np.clip(counts, 0, 2**bitdepth - 1).astype(f"uint{bitdepth}")
+    cv2.imshow('uint16 Image', counts)
+    return counts.astype(np.uint16)
+    #---- optics + noise ----
+    """
     #scale to photo-electron counts
     counts = img_f * 5000.0
     counts = rng.poisson(counts)
     counts = counts + rng.normal(0, 50, counts.shape)  #read noise
     counts = np.clip(counts, 0, 2**bitdepth - 1).astype(np.uint16)
     cv2.imshow('uint16 Image', counts)
-    return counts.astype(np.uint16)
+    return counts.astype(np.uint16)"""
 
 
 rng = default_rng(42)
@@ -288,7 +343,7 @@ def crop_box(img,dimensions,offset):
         = 2048, 2048,  dimensions[0], dimensions[1], offset[0], offset[1]
     cropped = img[row_off : row_off + box_h, col_off : col_off + box_w]
 
-    # Preserve original metadata & bit depth
+    #Preserve original metadata & bit depth
     return cropped
 def false_yellow_overlay(I16: np.ndarray, *, bitdepth=16,   gain=4.0) -> np.ndarray:
     """
@@ -305,52 +360,57 @@ if __name__ == "__main__":
     w,h = 128,200
     toy = {
         "indices": list(range(1, 10)),
-        "fluorescence": [100, 120, 80, 150, 90, 110, 130, 140, 95],
+        "fluorescence": [1000, 1200, 800, 1500, 900, 1100, 1300, 1400, 950],
         "size": [15, 18, 14, 20, 16, 17, 19, 18, 15],
         "shape": [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
                   (9, 9), (11, 8), (45, 9), (18, 7)],
-        "location": [(30, 25), (30, 50), (40, 80), (60, 30),
+        "location": [(30, 25), (30, 75), (40, 80), (60, 30),
                      (85, 70), (110, 223), (110, 85), (110, 110), (80, 110)],
         "rotation": [0, 15, -20, 30, 0, 45, -10, 0, 25],
     }
+    row_offset,col_offset   = center_offset((2048, 2048), (h, w))
 
     mask                    = generate_uint8_labels_with_buds(w, h, toy, rng=rng,
                                            bud_prob=BUD_PROB)
-    row_offset,col_offset   = center_offset((2048, 2048), (h, w))
-    centered_start          =   (row_offset, col_offset)
-    I0                      = render_fluor_image(mask, sigma_px=SIGMA_PSF,
-                              bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
+
     cropped_uint8_labels    = canvas_slicer(mask, (h, w), (row_offset, col_offset))
-    cropped_IO              =  crop_box(I0,(h,w),centered_start)
+    cropped_IO_metadata =   save_uint8_labels(cropped_uint8_labels, (h,w), (row_offset, col_offset),toy,"dump0\cropped_tester_mask")
+
+    IO_metadata         =    save_uint8_labels(mask, (h,w), (row_offset, col_offset),toy,"dump0\mask_tester_mask")
+
+
+
+    I0                      = render_fluor_image(mask,IO_metadata, sigma_px=SIGMA_PSF,
+                              bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
+    cropped_IO              =  crop_box(I0,(h,w),(row_offset, col_offset))
 
     #save uncropped and uncropped masks
 
-    IO_metadata         =    save_uint8_labels(mask, (h,w), centered_start,"dump0\mask_tester_mask")
-    cropped_IO_metadata =   save_uint8_labels(cropped_uint8_labels, (h,w), centered_start,"dump0\cropped_tester_mask")
 
-    #save raw uint16 + false-yellow PNG
-    imageio.imwrite("demo_fluor.tiff", cropped_IO)                     # training
+    imageio.imwrite("demo_fluor.tiff", cropped_IO)                     #training
 
+    # Compute ADU min/max
     fluors = np.array(cropped_IO_metadata["fluorescence"], dtype=np.float32)
     min_adu, max_adu = fluors.min(), fluors.max()
 
-    # define a stretch & false‑yellow function in this scope:
+    #define a stretch & false‑yellow function in this scope:
     def false_yellow_ADU(I16, *, min_adu, max_adu, gamma=0.7):
         """
         Linearly stretch I16 from [min_adu..max_adu] → [0..1],
         apply optional gamma, then false‑color into 0xCFCF00.
         """
         I = I16.astype(np.float32)
-        I_norm = (I - min_adu) / (max_adu - min_adu)
-        I_norm = np.clip(I_norm, 0, 1)
-        # optional gamma‑correction (brighten central cores)
+        I_norm = np.clip((I - min_adu) / (max_adu - min_adu),0,1)
         I_norm = I_norm ** (1 / gamma) if gamma != 1.0 else I_norm
+        rgb_y = np.array([207, 207, 0], dtype=np.float32) / 255.0
+        img = (I_norm[..., None] * rgb_y*(2**16-1)).astype(np.uint16)
+        return img
 
 
-
-    vis_yellow = (false_yellow_overlay(cropped_IO) * 255).astype(np.uint8)  # display
-    imageio.imwrite("vis_yellow.png", vis_yellow)
-
+    #ADU‑normalizer
+    vis_yellow = (false_yellow_ADU(cropped_IO, min_adu=min_adu, max_adu=max_adu, gamma=GAMMA)).astype(np.uint16)
+    #save raw uint16 + false-yellow PNG
+    imageio.imwrite("vis_yellow.tiff", vis_yellow, format='TIFF')
 
 
     vis_rgb = visualize_uint8_labels(cropped_uint8_labels,cropped_IO_metadata,None)

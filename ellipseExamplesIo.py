@@ -81,7 +81,7 @@ __all__ = [
 # I/O HELPERS
 #                                                                           -
 
-def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, base_filename: str) -> Dict[str, Any]:
+def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, metadata, base_filename: str) -> Dict[str, Any]:
     """Save a uint8 label map in four companion formats.
 
     1. Raw binary (`*.uint8`)
@@ -119,7 +119,8 @@ def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, base_filename:
         "dtype": "uint8",
         "unique_labels": np.unique(uint8_labels).tolist(),
         "max_label": int(uint8_labels.max()),
-        "offset": offset
+        "offset": offset,
+        "fluorescence": metadata["fluorescence"],
     }
     with open(f"{base_filename}_metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
@@ -284,10 +285,10 @@ def complete_pipeline(cells_data:    Dict) -> Tuple[np.ndarray, np.ndarray]:
     uint8_labels,   dimensions,    offset = generate_uint8_labels(w, h, cells_data)
 
     print("\n=== STEP 2: Save uint8 labels ===")
-    metadata    =   save_uint8_labels(uint8_labels, dimensions, offset, "dump0\canvased_yeast_segmentation")
+    metadata    =   save_uint8_labels(uint8_labels, dimensions, offset,cells_data, "dump0\canvased_yeast_segmentation")
     cropped_uint8_labels  =   canvas_slicer(uint8_labels, dimensions, offset)
 
-    save_uint8_labels(cropped_uint8_labels, dimensions, offset, "dump0\cropped_yeast_segmentation")
+    cropped_metadata    =   save_uint8_labels(cropped_uint8_labels, dimensions, offset, "dump0\cropped_yeast_segmentation")
 
     print("\n=== STEP 3: Define and order colorMap to cells ===")
     thickness   =   10
