@@ -10,7 +10,134 @@ $$
 NOT THE LATTER STUFF AAAAAAAA
 
 c=[d−a(x−n)^2-b(y−m)^2]/xy
- 
+ # Cell Data Structure Documentation
+
+## Overview
+The cell data dictionary defines a collection of elliptical cells for microscopy image segmentation and fluorescence rendering. This structure is used by the ellipse generation pipeline to create synthetic yeast cell images with realistic morphology and fluorescence patterns.
+
+## Data Schema
+
+```python
+cells_data = {
+    "indices": List[int],
+    "fluorescence": List[float],
+    "size": List[float],          # Currently unused in processing
+    "shape": List[Tuple[float, float]],
+    "location": List[Tuple[float, float]],
+    "rotation": List[float]
+}
+```
+
+## Field Specifications
+
+### `indices`
+- **Type**: `List[int]`
+- **Description**: Unique cell identifiers for uint8 label mapping
+- **Constraints**: 
+  - Range: `1 ≤ value ≤ 255`
+  - Must be unique within the dataset
+  - Cannot be `0` (reserved for background)
+- **Example**: `[1, 2, 3, 4, 5, 6, 7, 8, 9]`
+
+### `fluorescence`
+- **Type**: `List[float]`
+- **Description**: Fluorescence intensity values for each cell in ADU (Analog-to-Digital Units)
+- **Constraints**: 
+  - Range: `> 0` (positive values)
+  - Typical values: 800-1500 ADU for realistic cell brightness
+- **Usage**: Controls the brightness of each cell in the rendered fluorescence image
+- **Example**: `[1000, 1200, 800, 1500, 900, 1100, 1300, 1400, 950]`
+
+### `size`
+- **Type**: `List[float]`
+- **Description**: Cell size parameter (legacy field, currently unused in processing pipeline)
+- **Constraints**: `> 0`
+- **Note**: This field exists for compatibility but is not used in mask generation
+- **Example**: `[15, 18, 14, 20, 16, 17, 19, 18, 15]`
+
+### `shape`
+- **Type**: `List[Tuple[float, float]]`
+- **Description**: Ellipse semi-axes as `(semi_a, semi_b)` pairs in pixel units
+- **Constraints**: 
+  - Both values must be `> 0`
+  - `semi_a`: semi-major axis length (pixels)
+  - `semi_b`: semi-minor axis length (pixels)
+  - Typical yeast cell dimensions: 5-50 pixels depending on image resolution
+- **Usage**: Defines the shape and size of each elliptical cell
+- **Example**: `[(8, 19), (10, 13), (7, 6), (11, 7), (13, 8)]`
+
+### `location`
+- **Type**: `List[Tuple[float, float]]`
+- **Description**: Cell center coordinates as `(x, y)` pairs in pixel units
+- **Constraints**: 
+  - Must be within image boundaries after offset calculations
+  - `x`: horizontal position (column coordinate)
+  - `y`: vertical position (row coordinate)
+  - Coordinates are relative to the target raster dimensions
+- **Usage**: Determines where each cell is positioned in the final image
+- **Example**: `[(30, 25), (30, 75), (40, 80), (60, 30), (85, 70)]`
+
+### `rotation`
+- **Type**: `List[float]`
+- **Description**: Ellipse rotation angles in degrees
+- **Constraints**: 
+  - Typically `-180° ≤ value ≤ 180°`
+  - Counter-clockwise rotation convention
+  - Values are automatically normalized using `angle_deg % 360`
+- **Usage**: Controls the orientation of each elliptical cell
+- **Example**: `[0, 15, -20, 30, 0, 45, -10, 0, 25]`
+
+## Data Validation Rules
+
+1. **Array Length Consistency**: All lists must have the same length (equal to number of cells)
+2. **Index Uniqueness**: No duplicate values allowed in `indices` array
+3. **Positive Constraints**: `fluorescence`, `size`, and both components of `shape` tuples must be positive
+4. **Boundary Constraints**: `location` coordinates should account for cell dimensions and image boundaries
+5. **Type Safety**: All numeric values are converted to appropriate float64 types during ellipse coefficient calculation
+6. **ID Range**: Cell IDs must not exceed 255 (uint8 limitation for label images)
+
+## Example Usage
+
+```python
+# Valid cell data structure
+toy_cells = {
+    "indices": [1, 2, 3, 4, 5],
+    "fluorescence": [1000, 1200, 800, 1500, 900],
+    "size": [15, 18, 14, 20, 16],  # Legacy field
+    "shape": [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8)],
+    "location": [(30, 25), (30, 75), (40, 80), (60, 30), (85, 70)],
+    "rotation": [0, 15, -20, 30, 0]
+}
+
+# Generate labels and fluorescence image
+labels = generate_uint8_labels(w=128, h=200, cells_data=toy_cells)
+fluor_image = render_fluor_image(labels, metadata=toy_cells)
+```
+
+## Processing Pipeline Integration
+
+The cell data structure integrates with several key functions:
+
+- **`generate_uint8_labels()`**: Uses `indices`, `shape`, `location`, and `rotation`
+- **`render_fluor_image()`**: Uses `fluorescence` values for intensity mapping
+- **`ellipse_params_to_general_form()`**: Converts shape/location/rotation to mathematical coefficients
+- **Perlin noise perturbation**: Applies realistic boundary variations to ellipse masks
+
+## Error Handling
+
+Common validation errors and their causes:
+
+- **`ValueError: Cell ID exceeds uint8 range`**: Index value > 255
+- **`ValueError: semi_a and semi_b must be positive`**: Invalid shape parameters
+- **Index length mismatch**: Inconsistent array lengths between fields
+- **Boundary overflow**: Cell locations too close to image edges
+
+## Notes
+
+- The `size` field is maintained for backward compatibility but is not used in current ellipse generation algorithms
+- Cell coordinates are automatically adjusted for canvas centering using `center_offset()` calculations
+- The pipeline supports up to 255 unique cells due to uint8 label image constraints
+- Perlin noise can be applied to create realistic cell boundary variations during mask generation
  __ __
 |[][]
 |[][]
