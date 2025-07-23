@@ -6,7 +6,7 @@ from    noise   import  pnoise2
 from skimage.draw import ellipse
 from    scipy.signal import fftconvolve
 import psfmodels    as psfm
-from scipy.ndimage import distance_transform_edt,   center_of_mass
+from scipy.ndimage import distance_transform_edt,   center_of_mass, gaussian_filter, sobel
 import os
 import cv2
 
@@ -226,120 +226,137 @@ mask_bool = create_ellipse_mask_vectorized_perturbed(
 labels[mask_bool] = cell_id"""
 
 
-def render_fluor_image(label_map: np.ndarray,   metadata: dict, *,
-                       sigma_px=1.2,    bitdepth=16, gamma=0.7, rng=None):
-    """
-    Parameters
-    ----------
-    label_map : (H,W) uint8
-        Each pixel’s integer cell ID (0 = background).
-    metadata : dict
-        Must contain `"fluorescence"`: a list or array of length N_cells
-        giving the raw per‑cell ADU values.
-    sigma_px : float
-        Gaussian PSF blur radius in pixels.
-    bitdepth : int
-        Target bit depth (e.g. 16 for uint16 final).
-    gamma : float
-        Exponent for radial fall‑off shaping."""
 
-    #optional: normalize to [0…1] so that the brightest cell -> 1.0
-    img_f  = np.zeros_like(label_map, dtype=np.float32)
+def render_fluor_image(label_map: np.ndarray,
+                       metadata: dict,
+                       *,
+                       # ---------- GLOBAL -------------
+                       sigma_px: float = 1.0,
+                       bitdepth: int   = 16,
+                       gamma: float    = 1.2,
+                       rng=None,
+                       # ----------   RIM  -------------
+                       rim_dark_amp: float      = -0.03,
+                       rim_edge_sigma_px: float = 0.1,
+                       rim_edge_softness: float = 0.1,
+                       rim_perlin_period: int   = 0.01,
+                       rim_perlin_blur_px: int  = -10,
+                       # ---------- NUCLEOLUS ----------
+                       nuc_core_mul: float = -9,
+                       nuc_grad_amp: float = -9,#0.13
+                       nuc_decay_px: float = 2,
+                       # ---------- GRAD NOISE ---------
+                       grad_dark_amp: float = 0,#-0.08,
+                       # ---------- RANGE --------------
+                       peak_fraction: float = 0.7):
+    """
+    Flexible yeast‑fluorescence renderer.
+
+    Each **amp** parameter <0 only *darkens*.  Set it to 0 to disable
+    the corresponding noise.
+    """
+
     h, w = label_map.shape
-    fluors = np.asarray(metadata["fluorescence"], dtype=np.float32)
-    fluors /= fluors.max()
+    img  = np.zeros((h, w), dtype=np.float32)
+
     if rng is None:
         rng = np.random.default_rng()
 
-    #per-cell gradient + nucleolus
+    # ------------------------------------------------------------------
+    # fluorescence per cell -------------------------------------------------
+    # ------------------------------------------------------------------
+    fluors = np.asarray(metadata["fluorescence"], dtype=np.float32)
+    fluors /= fluors.max() + 1e-6
+
+    nuc_masks = []
+
     for cid in np.unique(label_map):
-        if cid == 0:          #background
+        if cid == 0:
             continue
-        #per‑cell base ADU fraction [0..1]
-        F0 = fluors[cid - 1]
-
-        #cell mask
         mask = (label_map == cid)
-        #mask_crop = mask[row_offset:row_offset+width, col_offset:col_offset+height]
+        F0   = fluors[cid-1]
 
+        # radial profile
+        din  = distance_transform_edt(mask).astype(np.float32)
+        yy, xx = np.nonzero(mask)
+        r_max  = din[yy, xx].max()
+        r_norm = din[yy, xx] / (r_max + 1e-6)
+        img[yy, xx] += F0 * (1.0 - r_norm**gamma)
 
-
-        #distance (inside = 0, boundary = 0) then normalise to [0,1]
-        dist_in = distance_transform_edt(mask).astype(np.float32)  #euclidean distance transform
-        yy, xx  = np.nonzero(mask)
-        r_max   = dist_in[yy, xx].max()
-        r_norm  = dist_in[yy, xx] / (r_max + 1e-6)
-        img_f[yy, xx] += F0 * (1.0 - r_norm ** gamma)#radial profile under gamma
-
-        #dark nucleolus (mask aware max radius) with strong center dimming
-        #dark nucleolus (mask‑aware max radius) with strong centre dimming
-        center_y, center_x = center_of_mass(mask)  #float centroid
-
-        attempts = 0
-        while True:
-            a_nuc = rng.uniform(0.25, 0.35) * r_max
-            b_nuc = a_nuc * rng.uniform(0.60, 0.90)
-
-            rho = rng.uniform(0, 0.30 * r_max)
-            phi = rng.uniform(0, 2 * np.pi)
-            nuc_cy = int(round(center_y + rho * np.sin(phi)))
-            nuc_cx = int(round(center_x + rho * np.cos(phi)))
-
-            if (0 <= nuc_cy < mask.shape[0] and #check boundary: distance at candidate centre must fit a_nuc
-                    0 <= nuc_cx < mask.shape[1] and
-                    mask[nuc_cy, nuc_cx] and
-                    dist_in[nuc_cy, nuc_cx] >= a_nuc):
-                break  #success
-            attempts += 1
-            if attempts > 32:  #give up & centre
-                nuc_cy, nuc_cx = int(center_y), int(center_x)
-                break
-
-        nuc_axes = (a_nuc, b_nuc)
-        nuc_rot  = rng.uniform(0, 180.)
+        # nucleolus geometry
+        cy, cx = center_of_mass(mask)
+        a_nuc  = rng.uniform(0.28, 0.34) * r_max
+        b_nuc  = a_nuc * rng.uniform(0.65, 0.90)
         nuc_mask = ellipse_mask_rot_jitter(
-                       *mask.shape,
-                       center=(nuc_cy, nuc_cx),
-                       axes=nuc_axes,
-                       angle_deg=nuc_rot,
-                       jitter=0.4,
-                       noise_scale=62,
-                       repeat=True,
-                       seed=rng.integers(1 << 31))
-        img_f[nuc_mask] *= rng.uniform(0.4, 0.6)
+            h, w, (cy, cx), (a_nuc, b_nuc),
+            angle_deg=rng.uniform(0, 180.),
+            jitter=0.4, noise_scale=48,
+            repeat=True, seed=rng.integers(1<<31))
+        img[nuc_mask] *= nuc_core_mul            # base dark
+        nuc_masks.append(nuc_mask)
 
-    #optics blur
+    # ------------------------------------------------------------------
+    # rim‑darkening w/ Perlin
+    # ------------------------------------------------------------------
+    if rim_dark_amp != 0.0:
+        dist_out = distance_transform_edt(label_map == 0).astype(np.float32)
+        dist_in  = distance_transform_edt(label_map != 0).astype(np.float32)
+        d_signed = dist_out
+        d_signed[label_map != 0] = -dist_in[label_map != 0]
 
-    #---- optics, shading, noise -------------------------------------------
-    if hasattr(psfm, "make_psf"):  #use high-NA model when available
-        psf_obj_2d = psfm.make_psf([0.0], nx=129, dxy=0.1, NA=1.40,
-                                   ns = 1.33, wvl = 0.52).astype(np.float32)[0]
-        psf_obj_2d /= psf_obj_2d.sum()
-        img_f = fftconvolve(img_f, psf_obj_2d, mode="same")
-    else:  #fall-back: simple Gaussian blur
-        img_f = ndimage.gaussian_filter(img_f, sigma_px)
-    psf_obj_2d = psfm.make_psf([0.0], nx=129, dxy=0.1, NA=1.40,
-                           ns=1.33, wvl=0.52).astype(np.float32)[0]
-    psf_obj_2d /= psf_obj_2d.sum()               #energy‑normalise
-    img_f = fftconvolve(img_f, psf_obj_2d, mode="same")
+        rim_w = np.exp(-((np.abs(d_signed)-0.5)/rim_edge_sigma_px)**2)
+        rim_w *= 1.0 / (1.0 + (dist_out / rim_edge_softness)**2)
 
-    noise_scale_fluor_y,noise_scale_fluor_x =   28,35
-    res_y, res_x = max(1, h // noise_scale_fluor_y), max(1, w // noise_scale_fluor_x)
-    shade = generate_perlin_noise_2d((h,w), (res_x, res_y), (False,False),).astype(np.float32)   #Perlin noise
-    img_f *= 1 + 0.15 * ndimage.gaussian_filter(shade, 256).astype(np.float32)
+        res_y = _fit_periods(h, rim_perlin_period)
+        res_x = _fit_periods(w, rim_perlin_period)
+        perlin = generate_perlin_noise_2d((h, w), (res_y, res_x),
+                                          tileable=(False, False)
+                                         ).astype(np.float32)
+        perlin = gaussian_filter(perlin, rim_perlin_blur_px)
+        img   *= 1.0 + rim_dark_amp * rim_w * perlin
 
-    img_f = np.nan_to_num(img_f, nan=0.0, posinf=0.0, neginf=0.0)
-    img_f = np.clip(img_f, 0.0, None)  #eliminate negative round‑off
-    counts = rng.poisson(img_f * (2 ** bitdepth - 1)).astype(np.float32)
+    # ------------------------------------------------------------------
+    # optics PSF
+    # ------------------------------------------------------------------
+    if hasattr(psfm, "make_psf"):
+        psf = psfm.make_psf([0.0], nx=65, dxy=0.1, NA=1.40,
+                            ns=1.33, wvl=0.52).astype(np.float32)[0]
+        psf /= psf.sum()
+        img  = fftconvolve(img, psf, mode='same')
+    else:
+        img  = gaussian_filter(img, sigma_px)
 
+    # ------------------------------------------------------------------
+    # nucleolus distance fall‑off
+    # ------------------------------------------------------------------
+    if nuc_grad_amp != 0.0:
+        for nm in nuc_masks:
+            dist_nuc = distance_transform_edt(~nm).astype(np.float32)
+            decay = np.exp(-(dist_nuc / nuc_decay_px)**2)
+            img[nm] += nuc_grad_amp * (1.0 - decay[nm])
 
-    counts +=rng.normal(0, 50, size=counts.shape).astype(np.float32)
-    counts = counts.astype(np.uint16)
-    cv2.imshow("uint16 Image", counts)
+    # ------------------------------------------------------------------
+    # gradient‑linked dark noise
+    # ------------------------------------------------------------------
+    if grad_dark_amp != 0.0:
+        gx = sobel(img, axis=0)
+        gy = sobel(img, axis=1)
+        grad = np.hypot(gx, gy)
+        grad /= grad.max() + 1e-6
+        dark_noise = rng.standard_normal((h, w)).astype(np.float32)
+        img *= 1.0 + grad_dark_amp * grad * np.abs(dark_noise)
+
+    # ------------------------------------------------------------------
+    # normalise & sample photon statistics
+    # ------------------------------------------------------------------
+    img -= img.min()
+    img /= img.max() / peak_fraction + 1e-6
+
+    counts = rng.poisson(img * ((1<<bitdepth)-1)).astype(np.int32)
+    counts += rng.normal(0, 50, counts.shape).astype(np.int32)
+    counts  = np.clip(counts, 0, (1<<bitdepth)-1).astype(np.uint16)
+
     return counts
-
-
-
 rng = default_rng(42)
 
 #parameters
@@ -355,16 +372,20 @@ def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.4):
     labels = np.zeros(canvas_shape, dtype=np.uint8)
     row_off, col_off = center_offset(canvas_shape, (h, w))
 
-    for cid, (a, b), (center_x, center_y), angle in zip(cells_data["indices"],
-                                            cells_data["shape"],
-                                            cells_data["location"],
-                                            cells_data["rotation"]):
-        coeffs = ellipse_params_to_general_form(center_x, center_y, a, b, angle)
+    indices    = cells_data["indices"]
+    shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
+    locations  = cells_data["location"]    #list of (x, y)
+    rotations  = cells_data["rotation"]    #list of θ in degrees
+
+    for cell_id, (semi_a, semi_b), (center_x, center_y), angle in zip(indices, shapes,    locations, rotations):
+        if cell_id > 255:
+            raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
+        coeffs = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
         parent = create_ellipse_mask_vectorized_perturbed2(
             w, h, coeffs, 0.7, 39, (row_off, col_off))
-        parent = _maybe_add_bud(parent, (center_y, center_x), (a, b),
+        parent = _maybe_add_bud(parent, (center_y, center_x), (semi_a, semi_b),
                                 rng=rng, prob=bud_prob)
-        labels[parent] = cid
+        labels[parent] = cell_id
     return labels
 
 def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
@@ -420,9 +441,10 @@ if __name__ == "__main__":
 
 
 
-    image0                      = render_fluor_image(mask,image0_metadata,
-                              bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
-    cropped_image0              =  crop_box(image0,(h,w),(row_offset, col_offset))
+    #image0                      = render_fluor_image(mask,image0_metadata,
+                      #        bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
+    image1 = render_fluor_image(mask,image0_metadata,bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
+    cropped_image0              =  crop_box(image1,(h,w),(row_offset, col_offset))
 
     #save uncropped and uncropped masks
 
