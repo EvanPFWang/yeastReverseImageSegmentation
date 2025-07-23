@@ -242,13 +242,13 @@ def render_fluor_image(label_map: np.ndarray,
                        rim_perlin_period: int   = 0.01,
                        rim_perlin_blur_px: int  = -10,
                        # ---------- NUCLEOLUS ----------
-                       nuc_core_mul: float = -9,
+                       nuc_core_mul: float = 0.01,
                        nuc_grad_amp: float = -9,#0.13
-                       nuc_decay_px: float = 2,
+                       nuc_decay_px: float = 1,
                        # ---------- GRAD NOISE ---------
                        grad_dark_amp: float = 0,#-0.08,
                        # ---------- RANGE --------------
-                       peak_fraction: float = 0.7):
+                       peak_fraction: float = 0.4):
     """
     Flexible yeast‑fluorescence renderer.
 
