@@ -64,6 +64,10 @@ class fourierPositionalEncoding(nn.Module):
         assert num_channels % 4 == 0, "num_channels must be multiple of 4"
         self.num_channels = num_channels
         self.inv_freq = 2.0 * np.pi / wave_length
+        self.register_buffer("freq",
+                             2 * torch.pi * torch.arange(self.num_channels // 4, dtype=torch.float32)
+                             .view(-1, 1, 1, 1)  # (C/4,1,1,1)
+                             )
 
     def forward(self, h: int, w: int, device=None):
         y, x = torch.meshgrid(
@@ -71,7 +75,7 @@ class fourierPositionalEncoding(nn.Module):
             torch.linspace(0, 1, w, device=device),
             indexing="ij",
         )
-        sin_inp = self.inv_freq * torch.stack((x, y), dim=-1)  # (H, W, 2)
+        sin_inp = self.freq * torch.stack((x, y), -1)  # broadcasts correctly
         emb = torch.cat((sin_inp.sin(), sin_inp.cos()), dim=-1)  # (H, W, 4)
         emb = emb.permute(2, 0, 1)  # (4, H, W)
         emb = emb.repeat(self.num_channels // 4, 1, 1)  # (C, H, W)
@@ -124,7 +128,7 @@ class posSPADEGenerator(nn.Module):
     def __init__(self, label_ch: int, coord_ch: int = 2, fourier_ch: int = 64):
         super().__init__()
         self.fourier = fourierPositionalEncoding(fourier_ch)
-        self.coord_conv = coordConv2d(label_ch + 1 + fourier_ch + coord_ch, 64, 3, padding=1)
+        self.coord_conv = coordConv2d(label_ch + 1 + fourier_ch, 64, 3, padding=1)
         self.down1 = nn.Conv2d(64, 128, 4, 2, 1)
         self.down2 = nn.Conv2d(128, 256, 4, 2, 1)
         self.spade128 = SPADEBlock(256, 256, label_ch)

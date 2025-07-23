@@ -4,6 +4,9 @@ import imageio.v2 as imageio  #imageio‑v3 friendly import
 import numpy as np
 from    noise   import  pnoise2
 from skimage.draw import ellipse
+from    scipy.signal import fftconvolve
+import psfmodels    as psfm
+from scipy.ndimage import distance_transform_edt,   center_of_mass
 import os
 import cv2
 
@@ -25,7 +28,8 @@ import matplotlib.pyplot as plt, numpy as np
 
 
 
-import time, matplotlib.pyplot as plt
+import time
+import  matplotlib.pyplot as plt
 from numpy.random import default_rng
 import tifffile
 from scipy import ndimage                                     #PSF blur
@@ -81,15 +85,15 @@ def add_bud_random_rotation(parent_center, parent_axes, *,
     a_p, b_p = parent_axes
 
     #random attachment angle on mother perimeter
-    φ = rng.uniform(0.0, 2*np.pi)
+    phi = rng.uniform(0.0, 2*np.pi)
 
-    y_bound = center_y + a_p * np.sin(φ)
-    x_bound = center_x + b_p * np.cos(φ)
+    y_bound = center_y + a_p * np.sin(phi)
+    x_bound = center_x + b_p * np.cos(phi)
 
     #shift bud centre slightly outward
     shift   = bud_offset * max(a_p, b_p)
-    bud_center_y  = y_bound + shift * np.sin(φ)
-    bud_center_x  = x_bound + shift * np.cos(φ)
+    bud_center_y  = y_bound + shift * np.sin(phi)
+    bud_center_x  = x_bound + shift * np.cos(phi)
 
     #scale axes & random own rotation
     a_bud, b_bud = a_p * bud_ratio, b_p * bud_ratio
@@ -120,14 +124,14 @@ def ellipse_mask_rot_jitter(h, w, center, axes, angle_deg: float,
     yy, xx = np.indices((h, w), dtype=np.float32)
     center_y, center_x = center
     a,  b  = axes
-
+    tiny32 = np.finfo(np.float32).tiny
     #convert world offsets -> body frame (x',y')  (StackOverflow rotation)
     dy, dx = yy - center_y, xx - center_x
-    φ      = np.deg2rad(angle_deg, dtype=np.float32)
-    cosφ, sinφ = np.cos(φ), np.sin(φ)
-    x_p = dx * cosφ + dy * sinφ
-    y_p = -dx * sinφ + dy * cosφ
-
+    phi      = np.deg2rad(angle_deg, dtype=np.float32)
+    cosphi, sinphi = np.cos(phi), np.sin(phi)
+    x_p = dx * cosphi + dy * sinphi
+    y_p = -dx * sinphi + dy * cosphi
+    eps32 = np.finfo(np.float32).eps
     #Per‑pixel jitter of axes via Perlin field
     if jitter:
 
@@ -135,11 +139,35 @@ def ellipse_mask_rot_jitter(h, w, center, axes, angle_deg: float,
         res_x = _fit_periods(w, noise_scale)
         noise = generate_perlin_noise_2d((h, w), (res_y, res_x),
                                          tileable=(repeat, repeat)).astype(np.float32)
-        a_eff = a * (1 + jitter * noise)
-        b_eff = b * (1 + jitter * noise)
-    else:
-        a_eff, b_eff = a, b
 
+        #more numerically stable for extra checks
+        scale = math.fma(jitter, noise,1.0)  if hasattr(math, "fma") else jitter * noise+1.0
+        scale = np.where(scale >= 0,
+                         np.maximum(scale, eps32),  #positive branch
+                         np.minimum(scale, -eps32)).astype(np.float32)  #negative branch
+        a_eff = a * scale
+        b_eff = b * scale
+
+        a_eff = np.where(a_eff >= 0,
+                         np.maximum(a_eff, eps32),  #positive branch
+                         np.minimum(a_eff, -eps32)).astype(np.float32)  #negative branch
+        b_eff = np.where(b_eff >= 0,
+                     np.maximum(b_eff, eps32),  #positive branch
+                     np.minimum(b_eff, -eps32)).astype(np.float32)  #negative branch
+
+    else:
+        a_eff = np.where(a >= 0,
+                         np.maximum(a, eps32),  #positive branch
+                         np.minimum(a, -eps32)).astype(np.float32)  #negative branch
+        b_eff = np.where(b >= 0,
+                         np.maximum(b, eps32),  #positive branch
+                         np.minimum(b, -eps32)).astype(np.float32)  #negative branch
+
+    inv_x = np.divide(x_p, a_eff, where=(a_eff != 0),
+                      out=np.zeros_like(x_p))
+    inv_y = np.divide(y_p, b_eff, where=(b_eff != 0),
+                      out=np.zeros_like(y_p))
+    mask = (inv_x ** 2 + inv_y ** 2) <= 1.0
     return (x_p / a_eff)**2 + (y_p / b_eff)**2 <= 1.0
 
 
@@ -178,13 +206,11 @@ def generate_uint8_labels_with_buds(w: int, h: int, cells_data: dict,
     row_off, col_off = center_offset(canvas_shape, (h, w))
 
     #loop over parent cells
-    for cell_id, (a, b), (center_x, center_y), angle in zip(cells_data["indices"],
-                                               cells_data["shape"],
-                                               cells_data["location"],
-                                               cells_data["rotation"]):
+    for cell_id, (a, b), (center_x, center_y), angle in zip(cells_data["indices"],cells_data["shape"],
+                                               cells_data["location"],cells_data["rotation"]):
         coeffs = ellipse_params_to_general_form(center_x, center_y, a, b, angle)
         parent = create_ellipse_mask_vectorized_perturbed2(
-            w, h, coeffs, 0.07, 64, (row_off, col_off)
+            w, h, coeffs, 0.7, 39, (row_off, col_off)
         )
         parent = _maybe_add_bud(parent, (center_y+row_off, col_off+center_x), (a, b),
                                 rng=rng, prob=bud_prob)
@@ -216,88 +242,102 @@ def render_fluor_image(label_map: np.ndarray,   metadata: dict, *,
         Target bit depth (e.g. 16 for uint16 final).
     gamma : float
         Exponent for radial fall‑off shaping."""
-    img_f = np.zeros_like(label_map, dtype=np.float32)
-    fluors = np.asarray(metadata["fluorescence"], dtype=np.float32)
 
     #optional: normalize to [0…1] so that the brightest cell -> 1.0
+    img_f  = np.zeros_like(label_map, dtype=np.float32)
+    h, w = label_map.shape
+    fluors = np.asarray(metadata["fluorescence"], dtype=np.float32)
     fluors /= fluors.max()
-
-
+    if rng is None:
+        rng = np.random.default_rng()
 
     #per-cell gradient + nucleolus
     for cid in np.unique(label_map):
         if cid == 0:          #background
             continue
-        mask = label_map == cid
-
         #per‑cell base ADU fraction [0..1]
         F0 = fluors[cid - 1]
 
         #cell mask
         mask = (label_map == cid)
-        yy, xx = np.nonzero(mask)
+        #mask_crop = mask[row_offset:row_offset+width, col_offset:col_offset+height]
 
-        #compute distance from cell center
-        cy, cx = np.median(yy), np.median(xx)
-        rr      = np.sqrt((yy - cy)**2 + (xx - cx)**2)
-        r_max   = rr.max() + 1e-6
 
-        #radial profile under gamma
-        img_f[yy, xx] = F0 * (1.0 - (rr / r_max)**gamma)
 
-        #dark nucleolus (30% radius) with strong center dimming
-        nuc_radius   = 0.3 * r_max
-        nuc_inds     = (rr <= nuc_radius)
-        #linearly ramp from dark_strength at center → 1.0 at edge
-        dark_strength = 0.1
-        ramp = rr[nuc_inds] / nuc_radius
-        dark_factor = dark_strength + (1 - dark_strength) * ramp
-        img_f[yy[nuc_inds], xx[nuc_inds]] *= dark_factor
-        """
-        #cell centre & max radius
-        yy, xx = np.where(mask)
-        center_y, center_x = np.median(yy), np.median(xx)
-        r_max  = np.sqrt(((yy - center_y)**2 + (xx - center_x)**2).max())
+        #distance (inside = 0, boundary = 0) then normalise to [0,1]
+        dist_in = distance_transform_edt(mask).astype(np.float32)  #euclidean distance transform
+        yy, xx  = np.nonzero(mask)
+        r_max   = dist_in[yy, xx].max()
+        r_norm  = dist_in[yy, xx] / (r_max + 1e-6)
+        img_f[yy, xx] += F0 * (1.0 - r_norm ** gamma)#radial profile under gamma
 
-        #radial profile
-        rr = np.sqrt((yy - center_y)**2 + (xx - center_x)**2)
-        F0 = rng.uniform(0.6, 1.0)
-        img_f[yy, xx] = F0 * (1. - (rr / (r_max + 1e-6))**gamma)
+        #dark nucleolus (mask aware max radius) with strong center dimming
+        #dark nucleolus (mask‑aware max radius) with strong centre dimming
+        center_y, center_x = center_of_mass(mask)  #float centroid
 
-        #--- dark nucleolus ---
-        nuc_axes = (0.3 * r_max, 0.3 * r_max)
+        attempts = 0
+        while True:
+            a_nuc = rng.uniform(0.25, 0.35) * r_max
+            b_nuc = a_nuc * rng.uniform(0.60, 0.90)
+
+            rho = rng.uniform(0, 0.30 * r_max)
+            phi = rng.uniform(0, 2 * np.pi)
+            nuc_cy = int(round(center_y + rho * np.sin(phi)))
+            nuc_cx = int(round(center_x + rho * np.cos(phi)))
+
+            if (0 <= nuc_cy < mask.shape[0] and #check boundary: distance at candidate centre must fit a_nuc
+                    0 <= nuc_cx < mask.shape[1] and
+                    mask[nuc_cy, nuc_cx] and
+                    dist_in[nuc_cy, nuc_cx] >= a_nuc):
+                break  #success
+            attempts += 1
+            if attempts > 32:  #give up & centre
+                nuc_cy, nuc_cx = int(center_y), int(center_x)
+                break
+
+        nuc_axes = (a_nuc, b_nuc)
         nuc_rot  = rng.uniform(0, 180.)
-        nuc_mask = ellipse_mask_rot_jitter(*mask.shape,
-                                           center=(center_y, center_x),
-                                           axes=nuc_axes,
-                                           angle_deg=nuc_rot,
-                                           jitter=0.03,
-                                           noise_scale=64,
-                                           repeat=True,
-                                           seed=rng)
-        img_f[nuc_mask] *= rng.uniform(0.4, 0.6)"""
+        nuc_mask = ellipse_mask_rot_jitter(
+                       *mask.shape,
+                       center=(nuc_cy, nuc_cx),
+                       axes=nuc_axes,
+                       angle_deg=nuc_rot,
+                       jitter=0.4,
+                       noise_scale=62,
+                       repeat=True,
+                       seed=rng.integers(1 << 31))
+        img_f[nuc_mask] *= rng.uniform(0.4, 0.6)
+
     #optics blur
-    img_f = ndimage.gaussian_filter(img_f, sigma_px)
 
-    #scale into photo‑electron counts → Poisson + read noise
-    rng = np.random.default_rng()
-    counts = img_f * (2**bitdepth - 1)
-    counts = rng.poisson(counts)
-    counts = counts + rng.normal(0, 50, size=counts.shape)
+    #---- optics, shading, noise -------------------------------------------
+    if hasattr(psfm, "make_psf"):  #use high-NA model when available
+        psf_obj_2d = psfm.make_psf([0.0], nx=129, dxy=0.1, NA=1.40,
+                                   ns = 1.33, wvl = 0.52).astype(np.float32)[0]
+        psf_obj_2d /= psf_obj_2d.sum()
+        img_f = fftconvolve(img_f, psf_obj_2d, mode="same")
+    else:  #fall-back: simple Gaussian blur
+        img_f = ndimage.gaussian_filter(img_f, sigma_px)
+    psf_obj_2d = psfm.make_psf([0.0], nx=129, dxy=0.1, NA=1.40,
+                           ns=1.33, wvl=0.52).astype(np.float32)[0]
+    psf_obj_2d /= psf_obj_2d.sum()               #energy‑normalise
+    img_f = fftconvolve(img_f, psf_obj_2d, mode="same")
 
-    #clamp & cast
-    counts = np.clip(counts, 0, 2**bitdepth - 1).astype(f"uint{bitdepth}")
-    cv2.imshow('uint16 Image', counts)
-    return counts.astype(np.uint16)
-    #---- optics + noise ----
-    """
-    #scale to photo-electron counts
-    counts = img_f * 5000.0
-    counts = rng.poisson(counts)
-    counts = counts + rng.normal(0, 50, counts.shape)  #read noise
-    counts = np.clip(counts, 0, 2**bitdepth - 1).astype(np.uint16)
-    cv2.imshow('uint16 Image', counts)
-    return counts.astype(np.uint16)"""
+    noise_scale_fluor_y,noise_scale_fluor_x =   28,35
+    res_y, res_x = max(1, h // noise_scale_fluor_y), max(1, w // noise_scale_fluor_x)
+    shade = generate_perlin_noise_2d((h,w), (res_x, res_y), (False,False),).astype(np.float32)   #Perlin noise
+    img_f *= 1 + 0.15 * ndimage.gaussian_filter(shade, 256).astype(np.float32)
+
+    img_f = np.nan_to_num(img_f, nan=0.0, posinf=0.0, neginf=0.0)
+    img_f = np.clip(img_f, 0.0, None)  #eliminate negative round‑off
+    counts = rng.poisson(img_f * (2 ** bitdepth - 1)).astype(np.float32)
+
+
+    counts +=rng.normal(0, 50, size=counts.shape).astype(np.float32)
+    counts = counts.astype(np.uint16)
+    cv2.imshow("uint16 Image", counts)
+    return counts
+
 
 
 rng = default_rng(42)
@@ -308,7 +348,7 @@ SIGMA_PSF = 1.2           #px  (optics blur)
 BITDEPTH  = 16
 GAMMA     = 0.7
 BUD_PROB  = 1.0           #always add a bud for demo
-NUCL_RATIO = 0.3          #inner dark ellipse as % of mother radius
+NUCL_RATimage0 = 0.3          #inner dark ellipse as % of mother radius
 
 def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.4):
     canvas_shape = (H, W)
@@ -333,7 +373,7 @@ def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
     b_cen, b_axes, b_rot = add_bud_random_rotation(parent_center,
                                                    parent_axes, rng=rng)
     bud = ellipse_mask_rot_jitter(*parent_mask.shape, b_cen, b_axes, b_rot,
-                                  jitter=0.05, noise_scale=96,
+                                  jitter=0.54, noise_scale=70,
                                   seed=rng.integers(1<<31))
     return parent_mask | (bud & ~parent_mask)
 
@@ -374,23 +414,23 @@ if __name__ == "__main__":
                                            bud_prob=BUD_PROB)
 
     cropped_uint8_labels    = canvas_slicer(mask, (h, w), (row_offset, col_offset))
-    cropped_IO_metadata =   save_uint8_labels(cropped_uint8_labels, (h,w), (row_offset, col_offset),toy,"dump0\cropped_tester_mask")
+    cropped_image0_metadata =   save_uint8_labels(cropped_uint8_labels, (h,w), (row_offset, col_offset),toy,"dump0\cropped_tester_mask")
 
-    IO_metadata         =    save_uint8_labels(mask, (h,w), (row_offset, col_offset),toy,"dump0\mask_tester_mask")
+    image0_metadata         =    save_uint8_labels(mask, (h,w), (row_offset, col_offset),toy,"dump0\mask_tester_mask")
 
 
 
-    I0                      = render_fluor_image(mask,IO_metadata, sigma_px=SIGMA_PSF,
+    image0                      = render_fluor_image(mask,image0_metadata,
                               bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
-    cropped_IO              =  crop_box(I0,(h,w),(row_offset, col_offset))
+    cropped_image0              =  crop_box(image0,(h,w),(row_offset, col_offset))
 
     #save uncropped and uncropped masks
 
 
-    imageio.imwrite("demo_fluor.tiff", cropped_IO)                     #training
+    imageio.imwrite("demo_fluor.tiff", cropped_image0)                     #training
 
-    # Compute ADU min/max
-    fluors = np.array(cropped_IO_metadata["fluorescence"], dtype=np.float32)
+    #Compute ADU min/max
+    fluors = np.array(cropped_image0_metadata["fluorescence"], dtype=np.float32)
     min_adu, max_adu = fluors.min(), fluors.max()
 
     #define a stretch & false‑yellow function in this scope:
@@ -408,12 +448,12 @@ if __name__ == "__main__":
 
 
     #ADU‑normalizer
-    vis_yellow = (false_yellow_ADU(cropped_IO, min_adu=min_adu, max_adu=max_adu, gamma=GAMMA)).astype(np.uint16)
+    vis_yellow = (false_yellow_ADU(cropped_image0, min_adu=min_adu, max_adu=max_adu, gamma=GAMMA)).astype(np.uint16)
     #save raw uint16 + false-yellow PNG
     imageio.imwrite("vis_yellow.tiff", vis_yellow, format='TIFF')
 
 
-    vis_rgb = visualize_uint8_labels(cropped_uint8_labels,cropped_IO_metadata,None)
+    vis_rgb = visualize_uint8_labels(cropped_uint8_labels,cropped_image0_metadata,None)
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].imshow(vis_rgb) ;          ax[0].set_title("Label RGB") ; ax[0].axis("off")
