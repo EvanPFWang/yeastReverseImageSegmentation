@@ -39,7 +39,7 @@ import os
 import json
 import time
 from typing import Tuple, Dict, Any
-
+from    skimage.color   import deltaE_ciede2000
 import cv2
 import imageio
 import numpy as np
@@ -81,7 +81,7 @@ __all__ = [
 # I/O HELPERS
 #                                                                           -
 
-def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, base_filename: str) -> Dict[str, Any]:
+def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, metadata, base_filename: str) -> Dict[str, Any]:
     """Save a uint8 label map in four companion formats.
 
     1. Raw binary (`*.uint8`)
@@ -119,7 +119,8 @@ def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, base_filename:
         "dtype": "uint8",
         "unique_labels": np.unique(uint8_labels).tolist(),
         "max_label": int(uint8_labels.max()),
-        "offset": offset
+        "offset": offset,
+        "fluorescence": metadata["fluorescence"],
     }
     with open(f"{base_filename}_metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
@@ -149,10 +150,13 @@ def n_spaced_lab(n:int=9):
 def order_for_gradient(lab):
     """Return an index array giving a ΔE‑smoothed order."""
     # PCA
+    n = lab.shape[0]
+    if n < 2:   #trivial
+        return np.arange(n, dtype=int)
+
     pc1 = PCA(n_components=1).fit_transform(lab).ravel()
     order = np.argsort(pc1)
     # ΔE check
-    from skimage.color import deltaE_ciede2000
     lab_sorted = lab[order]
     if (deltaE_ciede2000(lab_sorted[:-1], lab_sorted[1:]).max() > 25):
         order = np.argsort(lab[:,0])   # fallback: by lightness
@@ -208,19 +212,22 @@ def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict,colorma
     """Turn a label map into an RGB image using a lookup table.
     Extra labels beyond the length of the palette receive random colours.
     """
-
-    label_idx,width,height   =   metadata["unique_labels"], metadata["width"], metadata["height"]
-
     if colormap is None:
-        colormap = _DEFAULT_COLORMAP.copy()
+        #ASSUME LABELS ARE FROM 1 to N
+        label_idx       =   np.array(metadata["unique_labels"], dtype=int)
+        color_idx       = np.concatenate(([0], label_idx))    #build a full-length colormap of shape (max_label+1, 3)
+        base_colormap   = colormap_for_cells(color_idx)
 
+        max_label       = int(uint8_labels.max())
+        needed = max_label + 1 - base_colormap.shape[0]
 
-    max_label = int(uint8_labels.max())
-    if max_label >= len(colormap):
-        n_extra = max_label + 1 - len(colormap)
-        extra = np.random.randint(50, 256, (n_extra, 3), dtype=np.uint8)
-        colormap = np.vstack([colormap, extra])
-
+        if needed > 0:
+            # add random extras so that base_cmap has enough rows
+            extra = np.random.randint(50, 256, (needed, 3), dtype=np.uint8)
+            colormap = np.vstack([base_colormap, extra])
+        else:
+            colormap = base_colormap
+    # now safe to index
     return colormap[uint8_labels]
 
 
@@ -278,10 +285,10 @@ def complete_pipeline(cells_data:    Dict) -> Tuple[np.ndarray, np.ndarray]:
     uint8_labels,   dimensions,    offset = generate_uint8_labels(w, h, cells_data)
 
     print("\n=== STEP 2: Save uint8 labels ===")
-    metadata    =   save_uint8_labels(uint8_labels, dimensions, offset, "dump0\canvased_yeast_segmentation")
+    metadata    =   save_uint8_labels(uint8_labels, dimensions, offset,cells_data, "dump0\canvased_yeast_segmentation")
     cropped_uint8_labels  =   canvas_slicer(uint8_labels, dimensions, offset)
 
-    save_uint8_labels(cropped_uint8_labels, dimensions, offset, "dump0\cropped_yeast_segmentation")
+    cropped_metadata    =   save_uint8_labels(cropped_uint8_labels, dimensions, offset, "dump0\cropped_yeast_segmentation")
 
     print("\n=== STEP 3: Define and order colorMap to cells ===")
     thickness   =   10
@@ -324,10 +331,198 @@ def inspect_uint8_output(uint8_labels: np.ndarray) -> None:
 #                                                                           -
 # OpenCV‑BASED FAST FILL HELPER
 #                                                                           -
+from noise  import  pnoise2
 
 
 
+#!/usr/bin/env python3
+"""
+ellipse_pipeline_demo.py  •  Stage-B unit test
+------------------------------------------------
+• Builds a 2048² mother-with-bud label mask
+• Adds a smaller rotated inner ellipse (dark spot)
+• Maps per-cell fluorescence with radial gamma profile
+• Blurs with Gaussian PSF σ=1.2 px  ➜  mixed Poisson–Gaussian noise
+• Saves RGB label visualisation + uint16 fluorescence TIFF
+"""
 
+import os, math, time, numpy as np, matplotlib.pyplot as plt
+from numpy.random import default_rng
+from scipy import ndimage                                     # PSF blur  :contentReference[oaicite:9]{index=9}
+from perlin_numpy import generate_perlin_noise_2d             # Perlin  :contentReference[oaicite:10]{index=10}
+
+import ellipseMath, ellipseExamplesIo
+from ellipseMath import (add_bud_random_rotation,
+                         ellipse_mask_rot_jitter, _fit_periods,
+                         ellipse_params_to_general_form,
+                         create_ellipse_mask_vectorized_perturbed2,
+                         center_offset)
+#from ellipseExamplesIo import visualize_uint8_labels
+
+rng = default_rng(42)
+
+# --------------------------------------------------------------------
+# parameters
+H = W = 2048
+SIGMA_PSF = 1.2           # px  (optics blur)  :contentReference[oaicite:11]{index=11}
+BITDEPTH  = 16
+GAMMA     = 0.7
+BUD_PROB  = 1.0           # always add a bud for demo
+NUCL_RATIO = 0.3          # inner dark ellipse as % of mother radius
+
+# --------------------------------------------------------------------
+def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.4):
+    canvas_shape = (H, W)
+    labels = np.zeros(canvas_shape, dtype=np.uint8)
+    row_off, col_off = center_offset(canvas_shape, (h, w))
+
+    for cid, (a, b), (cx, cy), angle in zip(cells_data["indices"],
+                                            cells_data["shape"],
+                                            cells_data["location"],
+                                            cells_data["rotation"]):
+        coeffs = ellipse_params_to_general_form(cx, cy, a, b, angle)
+        parent = create_ellipse_mask_vectorized_perturbed2(
+            w, h, coeffs, 0.07, 64, (row_off, col_off))
+        parent = _maybe_add_bud(parent, (cy, cx), (a, b),
+                                rng=rng, prob=bud_prob)
+        labels[parent] = cid
+    return labels
+
+def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
+    if rng.random() > prob:
+        return parent_mask
+    b_cen, b_axes, b_rot = add_bud_random_rotation(parent_center,
+                                                   parent_axes, rng=rng)
+    bud = ellipse_mask_rot_jitter(*parent_mask.shape, b_cen, b_axes, b_rot,
+                                  jitter=0.05, noise_scale=96,
+                                  seed=rng.integers(1<<31))
+    return parent_mask | (bud & ~parent_mask)
+
+# --------------------------------------------------------------------
+def render_fluor_image(label_map, *, sigma_px, bitdepth, gamma, rng):
+    img = np.zeros_like(label_map, dtype=np.float32)
+    for cid in np.unique(label_map):
+        if cid == 0:
+            continue
+        mask = label_map == cid
+        yy, xx = np.where(mask)
+        cy, cx = np.median(yy), np.median(xx)
+        r_max  = np.sqrt(((yy - cy)**2 + (xx - cx)**2).max())
+
+        rr = np.sqrt((yy - cy)**2 + (xx - cx)**2)
+        F0 = rng.uniform(0.6, 1.0)
+        img[yy, xx] = F0 * (1. - (rr / (r_max+1e-6))**gamma)
+
+        # inner dark ellipse (nucleolus)
+        nucl_axes = (NUCL_RATIO * r_max, NUCL_RATIO * r_max)
+        nucl_rot  = rng.uniform(0, 180.)
+        nucl = ellipse_mask_rot_jitter(*label_map.shape,
+                                       (cy, cx), nucl_axes, nucl_rot,
+                                       jitter=0.03, noise_scale=64,
+                                       repeat=True)#, rng=rng)
+        img[nucl] *= rng.uniform(0.4, 0.6)
+
+    # PSF blur
+    img = ndimage.gaussian_filter(img, sigma_px)              # :contentReference[oaicite:12]{index=12}
+
+    # Mixed Poisson–Gaussian noise (FMD style) :contentReference[oaicite:13]{index=13}:contentReference[oaicite:14]{index=14}
+    counts = img * 6000.0
+    counts = rng.poisson(counts)
+    counts = counts + rng.normal(0, 60, counts.shape)  # read noise
+    counts = np.clip(counts, 0, 2**bitdepth - 1)
+    return counts.astype(np.uint16)
+
+# --------------------------------------------------------------------
+if __name__ == "__main__":
+    t0 = time.time()
+    toy = {
+        "indices":   [1, 2],
+        "shape":     [(300, 240), (280, 200)],
+        "location":  [(700, 800), (1300, 1200)],
+        "rotation":  [10, -20],
+    }
+    mask = generate_uint8_labels_with_buds(W, H, toy, rng=rng, bud_prob=BUD_PROB)
+    vis_rgb = visualize_uint8_labels(mask,
+                {"unique_labels":[0,1,2],"width":W,"height":H}, None)
+    I0 = render_fluor_image(mask, sigma_px=SIGMA_PSF,
+                            bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
+
+    # --- output & quick stats ---
+    imageio.imwrite("demo_mask_rgb.png", vis_rgb)
+    imageio.imwrite("demo_fluor.tiff",   I0)
+    print(f"demo_fluor mean={I0.mean():.1f}  max={I0.max()}  "
+          f"elapsed {time.time()-t0:.2f}s")
+
+    # display side-by-side for notebook use
+    fig, ax = plt.subplots(1,2, figsize=(10,5))
+    ax[0].imshow(vis_rgb);   ax[0].set_title("Label RGB");   ax[0].axis("off")
+    ax[1].imshow(I0, cmap='viridis'); ax[1].set_title("Fluorescence I₀"); ax[1].axis("off")
+    plt.tight_layout(); plt.show()
+
+
+def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
+                                             jitter: np.float32 = 0.07,
+                                             noise_scale: int = 64,
+                                             offset:    tuple[int,int]=(0,0),
+                                             seed: int | None = None):
+
+    """
+    As `create_ellipse_mask_vectorized`, but boundary is perturbed by Perlin
+    noise.  `jitter` ≈ relative amplitude; `noise_scale` controls feature size.
+    """
+    #2048x2048
+    #r(θ) = ab / sqrt((b cosθ)^2 + (a sinθ)^2)
+#    rng = np.random.default_rng(seed)#       Recover    pixel    semi‑axes
+    semi_a,  semi_b = coeffs["semi_a"], coeffs["semi_b"]
+    xSqr_coeff  =   coeffs["A"]
+    ySqr_coeff = coeffs["B"]
+
+
+    offset_row, offset_col = offset[0], offset[1]
+    center_x, center_y = coeffs["k"]+offset_col, \
+        offset_row+coeffs["l"]
+    #h is height and w is width so coordinate grids
+
+
+    eps =   np.finfo(np.float32).eps
+    scale   =   max(semi_a,semi_b)
+    a32_hat,    b32_hat =   semi_a/scale,    semi_b/scale
+    y_grid, x_grid = np.ogrid[:2048, :2048] #[:h,:w]
+    #
+
+    yy, xx = np.indices((2048, 2048))
+
+    dx, dy = xx - center_x, yy - center_y
+    theta = np.arctan2(dy, dx,  dtype=np.float32)
+
+    # Ideal ellipse radius for every pixel direction
+    #r_ideal = (a * b) / np.sqrt((b * np.cos(theta)) ** 2 +
+    #                            (a * np.sin(theta)) ** 2)
+    #       =scale^2*a_hat*b_hat/
+#(cont.)  np.sqrt(scale^2*[(b_hat*cos)^2+(a_hat*sin)^2])
+    #       =scale*a_hat*b_hat/
+    # (cont.)  np.sqrt([(b_hat*cos)^2+(a_hat*sin)^2])
+
+    #scale in top and bottom gets taken out
+    # so all we deal with are the hats  and one scale
+    # leads to more bits to work with
+    denom = np.hypot(b32_hat*np.cos(theta), a32_hat*np.sin(theta))
+    r_ideal =   (a32_hat * b32_hat)*scale/denom
+    # 2‑D Perlin noise field ∈ [‑1,1]
+
+    print("MAKE NOISE")
+    noise = np.clip(np.vectorize(lambda y0, x0: pnoise2(x0/noise_scale,
+                                                     y0/noise_scale,
+                                                     repeatx=w, repeaty=h,
+                                                     base=seed or 0),
+                               otypes=[np.float32])(yy, xx),
+                  -1.0, 1.0)
+    delta = jitter * noise
+    r_px = np.hypot(dx, dy)
+    print(f"PIXELS BACK - scale {scale}")
+    print(np.sum(r_px <= scale))
+    #return r_px <= scale
+    return r_px <= r_ideal * (1.0 + delta   +   eps)
 
 
 if __name__ == "__main__":

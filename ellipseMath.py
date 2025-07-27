@@ -398,6 +398,95 @@ def generate_uint8_labels_cv2(w: int,   h: int, cells_data: dict)\
         )
 
     return uint8_labels,    raster_shape,   (row_off, col_off)
+# --- NEW IMPORTS AT TOP ---
+import numpy as np
+from numpy.random import default_rng
+rng_global = default_rng()
+
+# -------------------------------------------------------------------------
+#  Helper 1 ─ choose where & how the bud attaches
+# -------------------------------------------------------------------------
+def add_bud_random_rotation(parent_center, parent_axes, *,
+                             bud_ratio: float = 0.6,
+                             bud_offset: float = 0.15,
+                             rng=rng_global):
+    """
+    Return (bud_center_yx, bud_axes, bud_rot_deg).
+
+    The bud centre is placed tangentially at a random angle on the mother
+    ellipse, then shifted *outward* by `bud_offset * max(a_p,b_p)`.
+    Bud semi‑axes = `bud_ratio * parent_axes`.
+    Rotation ∈ [0°,180°) to break alignment symmetry.
+
+    Notes
+    -----
+    • `bud_ratio`  ≈ 0.5–0.7 matches measured daughter : mother volume
+      ratios 0.5‑0.7 in *S. cerevisiae*:contentReference[oaicite:0]{index=0}.
+    • `bud_offset` ≥ `bud_ratio·a_p/max` guarantees the bud does **not**
+      cross the mother’s far side.
+    """
+    cy, cx   = parent_center
+    a_p, b_p = parent_axes
+
+    # ① random attachment angle on mother perimeter
+    φ = rng.uniform(0.0, 2*np.pi)
+
+    y_bound = cy + a_p * np.sin(φ)
+    x_bound = cx + b_p * np.cos(φ)
+
+    # ② shift bud centre slightly outward
+    shift   = bud_offset * max(a_p, b_p)
+    bud_cy  = y_bound + shift * np.sin(φ)
+    bud_cx  = x_bound + shift * np.cos(φ)
+
+    # ③ scale axes & random own rotation
+    a_bud, b_bud = a_p * bud_ratio, b_p * bud_ratio
+    bud_rot_deg  = rng.uniform(0.0, 180.0)
+
+    return (bud_cy, bud_cx), (a_bud, b_bud), bud_rot_deg
+
+# -------------------------------------------------------------------------
+#  Helper 2 ─ rotated, Perlin‑jittered ellipse mask *vectorised*
+# -------------------------------------------------------------------------
+def ellipse_mask_rot_jitter(h, w, center, axes, angle_deg: float,
+                            *, jitter=0.05, noise_scale=64,
+                            seed=None, repeat=True):
+    """
+    Boolean mask of a rotated ellipse with optional Perlin boundary jitter.
+
+    Parameters
+    ----------
+    angle_deg : float
+        CCW rotation of the bud ellipse.
+    jitter : float
+        Relative amplitude of Perlin noise perturbation (0 → no wobble).
+    noise_scale : int
+        Larger -> coarser bumps (Perlin period ≈ `noise_scale` px).
+    """
+    yy, xx = np.indices((h, w), dtype=np.float32)
+    cy, cx = center
+    a,  b  = axes
+
+    # convert world offsets -> body frame (x',y')  (StackOverflow rotation):contentReference[oaicite:1]{index=1}
+    dy, dx = yy - cy, xx - cx
+    φ      = np.deg2rad(angle_deg, dtype=np.float32)
+    cosφ, sinφ = np.cos(φ), np.sin(φ)
+    x_p = dx * cosφ + dy * sinφ
+    y_p = -dx * sinφ + dy * cosφ
+
+    # Per‑pixel jitter of axes via Perlin field
+    if jitter:
+        from perlin_numpy import generate_perlin_noise_2d
+        res_y =  _fit_periods(h, noise_scale)
+        res_x =  _fit_periods(w, noise_scale)
+        noise = generate_perlin_noise_2d((h, w), (res_y, res_x),
+                                         tileable=(repeat, repeat)).astype(np.float32)
+        a_eff = a * (1 + jitter * noise)
+        b_eff = b * (1 + jitter * noise)
+    else:
+        a_eff, b_eff = a, b
+
+    return (x_p / a_eff)**2 + (y_p / b_eff)**2 <= 1.0
 
 if __name__ == "__main__":
     p = ellipse_params_to_general_form(10, 5, 5, 3, 30)
