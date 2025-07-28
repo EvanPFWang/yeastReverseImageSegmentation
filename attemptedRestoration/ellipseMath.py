@@ -191,6 +191,9 @@ def create_ellipse_mask_vectorized_perturbed(w: int, h: int, coeffs: dict,
     #r(θ) = ab / sqrt((b cosθ)^2 + (a sinθ)^2)
 #    rng = np.random.default_rng(seed)#       Recover    pixel    semi‑axes
     semi_a,  semi_b = coeffs["semi_a"], coeffs["semi_b"]
+    xSqr_coeff  =   coeffs["A"]
+    ySqr_coeff = coeffs["B"]
+
 
     offset_row, offset_col = offset[0], offset[1]
     center_x, center_y = coeffs["k"]+offset_col, \
