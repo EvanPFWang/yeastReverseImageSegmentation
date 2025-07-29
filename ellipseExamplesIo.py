@@ -284,11 +284,12 @@ def complete_pipeline(cells_data:    Dict) -> Tuple[np.ndarray, np.ndarray]:
     print("=== STEP 1: Generate canvas of uint8 labels ===")
     uint8_labels,   dimensions,    offset = generate_uint8_labels(w, h, cells_data)
 
+    base_file, _= os.path.split(os.path.abspath(__file__))
     print("\n=== STEP 2: Save uint8 labels ===")
-    metadata    =   save_uint8_labels(uint8_labels, dimensions, offset,cells_data, "dump0\canvased_yeast_segmentation")
+    metadata    =   save_uint8_labels(uint8_labels, dimensions, offset,cells_data, f"{base_file}\dump0\canvased_yeast_segmentation")
     cropped_uint8_labels  =   canvas_slicer(uint8_labels, dimensions, offset)
 
-    cropped_metadata    =   save_uint8_labels(cropped_uint8_labels, dimensions, offset, "dump0\cropped_yeast_segmentation")
+    cropped_metadata    =   save_uint8_labels(cropped_uint8_labels, dimensions, offset,cells_data, f"{base_file}\dump0\cropped_yeast_segmentation")
 
     print("\n=== STEP 3: Define and order colorMap to cells ===")
     thickness   =   10

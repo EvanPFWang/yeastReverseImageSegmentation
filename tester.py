@@ -430,14 +430,14 @@ if __name__ == "__main__":
         "rotation": [0, 15, -20, 30, 0, 45, -10, 0, 25],
     }
     row_offset,col_offset   = center_offset((2048, 2048), (h, w))
-
+    base_file,  _           = os.path.split(os.path.abspath(__file__))
     mask                    = generate_uint8_labels_with_buds(w, h, toy, rng=rng,
                                            bud_prob=BUD_PROB)
 
     cropped_uint8_labels    = canvas_slicer(mask, (h, w), (row_offset, col_offset))
-    cropped_image0_metadata =   save_uint8_labels(cropped_uint8_labels, (h,w), (row_offset, col_offset),toy,"dump0\cropped_tester_mask")
+    cropped_image0_metadata =   save_uint8_labels(cropped_uint8_labels, (h,w), (row_offset, col_offset),toy,f"{base_file}\dump0\cropped_tester_mask")
 
-    image0_metadata         =    save_uint8_labels(mask, (h,w), (row_offset, col_offset),toy,"dump0\mask_tester_mask")
+    image0_metadata         =    save_uint8_labels(mask, (h,w), (row_offset, col_offset),toy,f"{base_file}\dump0\mask_tester_mask")
 
 
 
