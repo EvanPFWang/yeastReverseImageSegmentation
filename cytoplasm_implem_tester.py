@@ -264,7 +264,7 @@ def render_fluor_image(label_map: np.ndarray,
                        # shading (d_norm) is enabled, nuc_grad_amp should
                        # generally be set to 0.
                        nuc_grad_amp: float = 0.0,  # default disabled
-                       nuc_decay_px: float = 4,
+                       nuc_decay_px: float = 11,
                        #---------- GRAD NOISE ---------
                        grad_dark_amp: float = 0,#-0.08,
                        #---------- RANGE --------------
@@ -298,6 +298,9 @@ def render_fluor_image(label_map: np.ndarray,
     coll_nuc_mask_bool     = np.zeros((N, h, w), dtype=bool)
     coll_nuc_mask_Fluor_list = np.zeros((N, h, w), dtype=np.float32)
     coll_nuc_edge_stack = np.zeros((N, h, w), dtype=np.float32)
+    """
+    per_decay_px = np.empty(N, dtype=np.int32)
+    """
 
     for idx, mask in enumerate(masks_bool):
         # Skip empty masks
@@ -312,6 +315,12 @@ def render_fluor_image(label_map: np.ndarray,
         cy, cx = center_of_mass(mask)
         a_nuc = rng.uniform(0.5, 0.84) * r_max
         b_nuc = a_nuc * rng.uniform(0.3, 0.73)
+
+        """
+        decay_px = rng.integers(1, int(b_nuc) + 1)
+        per_decay_px[idx] = decay_px
+        """
+
         nuc_m = ellipse_mask_rot_jitter(
             h, w, (cy, cx), (a_nuc, b_nuc),
             angle_deg=rng.uniform(0, 360.0),
@@ -350,6 +359,8 @@ def render_fluor_image(label_map: np.ndarray,
         for idx in range(N):
             d = distance_transform_edt(~coll_nuc_mask_bool[idx])
             decay[idx] = np.exp(-(d / (nuc_decay_px + 1e-6)) ** 2)
+            """decay_val = per_decay_px[idx] + 1e-6  # avoid divide-by-zero
+            decay[idx] = np.exp(-(d / decay_val) ** 2)"""
         mult      = 1.0 + nuc_grad_amp * decay
         cytoplasm = masks_bool & ~coll_nuc_mask_bool
         coll_fluor_stack[cytoplasm] *= mult[cytoplasm]
