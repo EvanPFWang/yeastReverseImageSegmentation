@@ -109,13 +109,13 @@ def add_bud_random_rotation(parent_center, parent_axes, *,
 
     #analytic shift for tangency i hate this as it is numerically v iffy
     ux, uy =  math.cos(theta_rad)*n_hat[0] + math.sin(theta_rad)*n_hat[1], \
-             -math.sin(theta_rad)*n_hat[0] + math.cos(theta_rad)*n_hat[1]  # R(-θ) n̂
+             -math.sin(theta_rad)*n_hat[0] + math.cos(theta_rad)*n_hat[1]  #R(-θ) n̂
     denom   = (ux/a_semi_bud)**2 + (uy/b_semi_bud)**2
     s_touch = 1.0 / math.sqrt(denom + eps)  #max_sensible offfset
 
-    sigma_off = s_touch / 1.96                    # 2-sided 95 % quantile
+    sigma_off = s_touch / 1.96                    #2-sided 95 % quantile
     r_off     = np.abs(rng.normal(0.0, sigma_off))
-    r_off     = min(r_off, s_touch)               # clamp overshoot
+    r_off     = min(r_off, s_touch)               #clamp overshoot
 
     Cx = Px + r_off * n_hat[0]
     Cy = Py + r_off * n_hat[1]
@@ -133,6 +133,7 @@ def add_bud_random_rotation(parent_center, parent_axes, *,
     bud_rot_deg  = rng.uniform(0.0, 180.0)"""
 
     return (Cy, Cx), (a_semi_bud, b_semi_bud), theta
+
 
 
 
@@ -242,24 +243,24 @@ labels[mask_bool] = cell_id"""
 def render_fluor_image(label_map: np.ndarray,
                        metadata: dict,
                        *,
-                       # ---------- GLOBAL -------------
+                       #---------- GLOBAL -------------
                        sigma_px: float = 1.0,
                        bitdepth: int   = 16,
                        gamma: float    = 2,
                        rng=None,
-                       # ----------   RIM  -------------
+                       #----------   RIM  -------------
                        rim_dark_amp: float      = -0.1,
                        rim_edge_sigma_px: float = 2,
                        rim_edge_softness: float = 0.1,
                        rim_perlin_period: int   = 0.1,
                        rim_perlin_blur_px: int  = -10,
-                       # ---------- NUCLEOLUS ----------
-                       nuc_core_mul: float = 0.01,
-                       nuc_grad_amp: float = -9,#0.13
-                       nuc_decay_px: float = 1,
-                       # ---------- GRAD NOISE ---------
+                       #---------- NUCLEOLUS ----------
+                       nuc_core_mul: float = 0.1,
+                       nuc_grad_amp: float = -2,#0.13
+                       nuc_decay_px: float = 4,
+                       #---------- GRAD NOISE ---------
                        grad_dark_amp: float = 0,#-0.08,
-                       # ---------- RANGE --------------
+                       #---------- RANGE --------------
                        peak_fraction: float = 0.4,  coll_mask_map):
     """
     Flexible yeast‑fluorescence renderer.
@@ -276,85 +277,89 @@ def render_fluor_image(label_map: np.ndarray,
     """    coll_fluors_maps =
 
     min_vals = np.where(count > 0,
-                        safe_stack.min(axis=0),  # pixel‑wise min over N
+                        safe_stack.min(axis=0),  #pixel‑wise min over N
                         0.0).astype(np.float32)"""
     #
-    # fluorescence per cell
+    #fluorescence per cell
     fluors = np.asarray(metadata["fluorescence"], dtype=np.float32)
-    fluors_norm = fluors / (fluors.max() + 1e-6)  # (N,)
+    fluors_norm = fluors / (fluors.max() + 1e-6)  #(N,)
     F = fluors_norm[:, None, None]
     coll_fluor_stack = np.zeros((N, h, w), dtype=np.float32)
     coll_edge_stack = np.zeros((N, h, w), dtype=np.float32)
 
+    coll_nuc_mask_bool     = np.zeros((N, h, w), dtype=bool)
+    coll_nuc_mask_Fluor_list = np.zeros((N, h, w), dtype=np.float32)
     coll_nuc_edge_stack = np.zeros((N, h, w), dtype=np.float32)
 
     for idx, mask in enumerate(masks_bool):
         if not mask.any():
             continue
-        din = distance_transform_edt(mask)  # (h, w) float32
+        din = distance_transform_edt(mask)  #(h, w) float32
         r_max = din[mask].max()
-        coll_fluor_stack[idx, mask] = F[idx] * (
-                1.0 - (din[mask] / (r_max + 1e-6)) #** gamma
-        )
-        #CHECK THIS ABOVE ^^^^
-        edges = edge_mask_np(mask)
-        coll_edge_stack[idx, edges] = F[idx]
 
-        #nucleolus darkening
+        #nucleolus mask
         cy, cx = center_of_mass(mask)
-        a_nuc  = rng.uniform(0.5, 0.84) * r_max
-        b_nuc  = a_nuc * rng.uniform(0.3, 0.73)
-        nuc_m  = ellipse_mask_rot_jitter(
+        a_nuc = rng.uniform(0.5, 0.84) * r_max
+        b_nuc = a_nuc * rng.uniform(0.3, 0.73)
+        nuc_m = ellipse_mask_rot_jitter(
             h, w, (cy, cx), (a_nuc, b_nuc),
             angle_deg=rng.uniform(0, 360.),
             jitter=0.4, noise_scale=48,
             repeat=True, seed=rng.integers(1 << 31),
         )
-        nuc_mask_in_cell    =   nuc_m   &   mask
-        coll_fluor_stack[idx, nuc_mask_in_cell] *= nuc_core_mul
+        nuc_mask_in_cell = nuc_m & mask
+        coll_nuc_mask_bool[idx, nuc_mask_in_cell] = True
+
+
+
+        # 3) cytoplasm shading -------------------------------------------
+        base = F[idx]
+        cyto = mask & ~nuc_m
+        coll_fluor_stack[idx, cyto] = base * (1.0 - din[cyto] / (r_max + 1e-6))
+
+        #nuc darkening
+        coll_fluor_stack[idx, nuc_m & mask] = base * nuc_core_mul
+
+        #edging
+        edges = edge_mask_np(mask)
+        coll_edge_stack[idx, edges] = F[idx]
+
         nuc_edges = edge_mask_np(nuc_mask_in_cell)
         coll_nuc_edge_stack[idx, nuc_edges] = F[idx]
-#fluors /= fluors.max() + 1e-6
+        coll_nuc_mask_Fluor_list[idx, nuc_mask_in_cell] = nuc_core_mul
+
+
+    #nucleolus gradient CYTOPLASM ONLY
+    if nuc_grad_amp != 0.0:
+        decay = np.empty_like(coll_fluor_stack, dtype=np.float32)
+        for idx in range(N):
+            d = distance_transform_edt(~coll_nuc_mask_bool[idx])
+            decay[idx] = np.exp(-(d / (nuc_decay_px + 1e-6)) ** 2)
+        mult      = 1.0 + nuc_grad_amp * decay
+        cytoplasm = masks_bool & ~coll_nuc_mask_bool
+        coll_fluor_stack[cytoplasm] *= mult[cytoplasm]
 
     #resolve overlaps
-    overlap_count = masks_bool.sum(axis=0, dtype=np.uint8)           # (h, w)
+    overlap_count = masks_bool.sum(axis=0, dtype=np.uint8)
 
-    # Vectorised masked‑minimum (ignore zeros)
-    safe = np.where(masks_bool, coll_fluor_stack, np.inf)             # (N,h,w)
-    min_vals = np.min(safe, axis=0)
+    #Vectorised masked‑minimum (ignore zeros)
+    safe          = np.where(masks_bool, coll_fluor_stack, np.inf)
+    min_vals      = np.min(safe, axis=0)
     min_vals[np.isinf(min_vals)] = 0.0
-
-    img = np.where(overlap_count > 0,
-                   min_vals / overlap_count**2,
-                   0.0).astype(np.float32)
+    img = np.where(overlap_count > 0, min_vals / overlap_count, 0.0).astype(np.float32)
 
 
-    # ------------------------------------------------------------------
-    # rim‑darkening w/ Perlin
-    # ------------------------------------------------------------------
+
+    #------------------------------------------------------------------
+    #rim‑darkening w/ Perlin
+    #------------------------------------------------------------------
     print("rim‑darkening w/ Perlin")
-    # ---------- Rim darkening using pre‑computed edge map -----------------
-    #"""
-    if rim_dark_amp != 0.0:
-        #mplitude‑weighted rim union  (float32, 0-1)
-        rim_amp_map = coll_edge_stack.sum(0)  # (h, w)
+    #---------- Rim darkening using pre‑computed edge map -----------------
 
-        #smooth -> soft feather
-        rim_w = gaussian_filter(rim_amp_map, rim_edge_sigma_px)
-        rim_w *= 1.0 / (1.0 + (distance_transform_edt(rim_amp_map == 0)
-                               / rim_edge_softness) ** 2)
 
-        #perlin multiplier (same as before)
-        res_y = _fit_periods(h, rim_perlin_period)
-        res_x = _fit_periods(w, rim_perlin_period)
-        perlin = generate_perlin_noise_2d(
-            (h, w), (res_y, res_x), tileable=(False, False)
-        ).astype(np.float32)  # → smooth low‑freq
-        perlin = gaussian_filter(perlin, rim_perlin_blur_px)
 
-        #apply darkening
-        img *= 1.0 + rim_dark_amp * rim_w * perlin
-    #"""
+
+
     print("optics PSF")
 
     #------------------------------------------------------------------
@@ -368,9 +373,9 @@ def render_fluor_image(label_map: np.ndarray,
     else:
         img  = gaussian_filter(img, sigma_px)
     """
-    # ------------------------------------------------------------------
-    # nucleolus distance fall‑off
-    # ------------------------------------------------------------------
+    #------------------------------------------------------------------
+    #nucleolus distance fall‑off
+    #------------------------------------------------------------------
     print("ucleolus distance fall‑off")
     """
     if nuc_grad_amp != 0.0:
@@ -392,13 +397,19 @@ def render_fluor_image(label_map: np.ndarray,
         dark_noise = rng.standard_normal((h, w)).astype(np.float32)
         img *= 1.0 + grad_dark_amp * grad * np.abs(dark_noise)
     """
-    # ------------------------------------------------------------------
-    # normalise & sample photon statistics
-    # ------------------------------------------------------------------
+    #------------------------------------------------------------------
+    #normalise & sample photon statistics
+    #------------------------------------------------------------------
     print("norm and sample photon stats")
 
     img -= img.min()
     img /= img.max() / peak_fraction + 1e-6
+
+
+    bg_mask = ~masks_bool.any(axis=0)
+    img[bg_mask] = 0.0
+    img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
+    img = np.clip(img, 0.0, 1.0)
 
     counts = rng.poisson(img * ((1<<bitdepth)-1)).astype(np.int32)
     #counts += rng.normal(0, 50, counts.shape).astype(np.int32)
@@ -455,8 +466,8 @@ def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.6):
         parent = _maybe_add_bud(parent, (center_y + row_off, col_off + center_x), (semi_a, semi_b),
                                 rng=rng, prob=BUD_PROB)
 
-#        overlap = mask & (labels != 0)
-#        ith_Label[parent]   =   cell_id
+#overlap = mask & (labels != 0)
+#ith_Label[parent]   =   cell_id
         coll_labels[idx,parent] = cell_id
         labels[parent] = cell_id
     return labels,  coll_labels#, intersection
@@ -516,7 +527,7 @@ if __name__ == "__main__":
 
     coll_cropped_uint8_labels = np.stack(
         [canvas_slicer(m, (h, w), (row_offset, col_offset)) for m in coll_mask_map],
-        axis=0  # shape (N, h, w)
+        axis=0  #shape (N, h, w)
     )
 
     cell_ids = np.arange(1, coll_cropped_uint8_labels.shape[0] + 1,
@@ -552,7 +563,7 @@ if __name__ == "__main__":
     cropped_fluor = crop_box(full_fluor, (h, w), (row_offset, col_offset))
     imageio.imwrite("demo_fluor.tiff", cropped_fluor)                     #training
 
-    FLOOR_FRACTION  =   0.00
+    FLOOR_FRACTION  =   0.01
     CLIP_FRACTION   =   0.005
     #define a stretch & false‑yellow function in this scope:
     def false_yellow_ADU1(I16, *, min_adu, max_adu, gamma=1):
@@ -584,17 +595,17 @@ if __name__ == "__main__":
         """
         I = I16.astype(np.float32)
 
-        # --- find robust min / max -------------------------------------------
+        #--- find robust min / max -------------------------------------------
         nz = I[I > 0]
-        if nz.size == 0:  # blank frame guard
+        if nz.size == 0:  #blank frame guard
             return np.zeros((*I.shape, 3), dtype=np.uint8)
 
         min_adu = nz.min()
         max_adu = np.percentile(nz, (1.0 - clip_frac) * 100.0)
 
         #linear stretch
-        I_lin = np.zeros_like(I, dtype=np.float32)  # bg stays 0
-        nz = I > 0  # mask of non-zero pixels
+        I_lin = np.zeros_like(I, dtype=np.float32)  #bg stays 0
+        nz = I > 0  #mask of non-zero pixels
         I_lin[nz] = (I[nz] - min_adu) / (max_adu - min_adu + 1e-6)
         I_lin[nz] = floor_frac + (1.0 - floor_frac) * np.clip(I_lin[nz], 0, 1)
 
@@ -602,7 +613,7 @@ if __name__ == "__main__":
         I_gamma = I_lin ** (1.0 / gamma) if gamma != 1.0 else I_lin
 
         #false-yellow
-        rgb_y = np.array([207, 207, 0], dtype=np.float32) / 255.0  # 0xCFCF00
+        rgb_y = np.array([207, 207, 0], dtype=np.float32) / 255.0  #0xCFCF00
         return (I_gamma[..., None] * rgb_y * ((1 << bitdepth) - 1)).astype(np.uint16)
 
     #ADU‑normalizer
