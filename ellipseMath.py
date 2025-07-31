@@ -81,7 +81,7 @@ def ellipse_params_to_general_form(center_x: float,
     #rel_diff threshold
     rel_eps = (2.0 * _SINGLE_EPS) if circle_rel_eps is None else np.float32(circle_rel_eps)
 
-    #circle shortcut – if |a - b| <= rel_eps * max(a, b), treat as circle.
+    #circle shortcut - if |a - b| <= rel_eps * max(a, b), treat as circle.
     if abs(semi_a - semi_b) <= rel_eps**0.8 * max(semi_a, semi_b):  #keeps 1024 pix drift ≲2.9e-6
         r      = np.float32(0.5) * (semi_a + semi_b)
         inv_r2 = np.float32(1.0) / (r * r)
@@ -114,7 +114,7 @@ def ellipse_params_to_general_form(center_x: float,
     #Stable product for Δ = 1/a² − 1/b²  (avoids catastrophic cancellation)
     #   Δ = (b_hat − a_hat)(b_hat + a_hat) / (a_hat² b_hat²)
     #   Underflow safeguard: if Δ under‑flows to zero at float64, we can
-    #   safely snap B to zero – numerically, the ellipse is essentially
+    #   safely snap B to zero - numerically, the ellipse is essentially
     #   axis‑aligned.
     diff   = (b_hat - a_hat) * (b_hat + a_hat)
     denom  = (a_hat * a_hat) * (b_hat * b_hat)
@@ -243,10 +243,45 @@ def _fit_periods(dim: int, approx_cell: int) -> int:
     """
     smallest period count res >= dim/approx_cell such that dim % res == 0.
     """
+    if  approx_cell <1:
+        approx_cell = 1
     res = max(1, round(dim / approx_cell))
     while dim % res:             # bump up until it divides cleanly
         res += 1
     return res
+
+
+def edge_mask_np(masks: np.ndarray) -> np.ndarray:
+    """
+    Compute 8‑connected edge pixels for one mask or a stack of masks, NumPy‑only.
+
+    Parameters
+    masks : np.ndarray[bool | uint8]
+        Either (H, W) or (N, H, W). Non‑zero/True values are foreground.
+    Returns
+    np.ndarray[bool]
+        Same shape as `masks`, True where a pixel is on the edge.
+    """
+    # Ensure we always have a leading batch dimension
+    if masks.ndim == 2:
+        masks = masks[None]
+
+    # Pad with 0/False so roll‑based slicing never wraps around
+    padded = np.pad(masks.astype(bool), ((0, 0), (1, 1), (1, 1)),
+                    mode="constant", constant_values=False)
+
+    # Sum the 8 neighbours for every pixel in one vectorised shot
+    neigh_sum = (
+        padded[:, :-2, :-2] + padded[:, :-2, 1:-1] + padded[:, :-2, 2:] +
+        padded[:, 1:-1, :-2]                      + padded[:, 1:-1, 2:] +
+        padded[:, 2:,  :-2] + padded[:, 2:,  1:-1] + padded[:, 2:,  2:]
+    )
+
+    interior = (neigh_sum == 8) & masks          # fully surrounded pixels
+    edges    = masks & ~interior                 # mask minus interior
+
+    return edges if edges.shape[0] > 1 else edges[0]
+
 def create_ellipse_mask_vectorized_perturbed2(w: int, h: int, coeffs: dict,
                                                    jitter: np.float32 = 0.07,
                                                    noise_scale: int = 64,
@@ -382,7 +417,7 @@ def generate_uint8_labels_cv2(w: int,   h: int, cells_data: dict)\
         center = (int(round(center_x)), int(round(center_y)))   # integer pixel coords
         axes   = (int(round(a)),  int(round(b)))    # integer semi‑axes
 
-        # thickness = –1 (cv2.FILLED) -> fill the ellipse interior
+        # thickness = -1 (cv2.FILLED) -> fill the ellipse interior
         cv2.ellipse(
             img       = roi,
             center    = center,

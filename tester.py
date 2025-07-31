@@ -5,6 +5,9 @@ import numpy as np
 from    noise   import  pnoise2
 from skimage.draw import ellipse
 from    scipy.signal import fftconvolve
+
+from    pathlib import  Path
+
 import psfmodels    as psfm
 from scipy.ndimage import distance_transform_edt,   center_of_mass, gaussian_filter, sobel
 import os
@@ -39,7 +42,7 @@ import ellipseMath, ellipseExamplesIo
 from ellipseMath import     (_fit_periods,
                             ellipse_params_to_general_form,
                             create_ellipse_mask_vectorized_perturbed2,
-                             center_offset)
+                             center_offset,edge_mask_np)
 from ellipseExamplesIo import   (visualize_uint8_labels,
                                 save_uint8_labels,
                                 n_spaced_lab,
@@ -76,7 +79,7 @@ def add_bud_random_rotation(parent_center, parent_axes, *,
 
     Notes
     -----
-    • `bud_ratio`  ≈ 0.5–0.7 matches measured daughter : mother volume
+    • `bud_ratio`  ≈ 0.5-0.7 matches measured daughter : mother volume
       ratios 0.5‑0.7 in *S. cerevisiae*:.
     • `bud_offset` ≥ `bud_ratio·a_p/max` guarantees the bud does **not**
       cross the mother’s far side.
@@ -194,28 +197,7 @@ def _maybe_add_bud(parent_mask, parent_center, parent_axes, *,
     bud_only = bud_mask & ~parent_mask
     return parent_mask | bud_only
 
-#hook into generate_uint8_labels
-def generate_uint8_labels_with_buds(w: int, h: int, cells_data: dict,
-                                    *, rng=None, bud_prob=0.4):
-    """
-    As original but inserts buds on a subset of mothers.
-    """
-    rng = rng or np.random.default_rng()
-    canvas_shape = (2048, 2048)
-    uint8_labels = np.zeros(canvas_shape, dtype=np.uint8)
-    row_off, col_off = center_offset(canvas_shape, (h, w))
 
-    #loop over parent cells
-    for cell_id, (a, b), (center_x, center_y), angle in zip(cells_data["indices"],cells_data["shape"],
-                                               cells_data["location"],cells_data["rotation"]):
-        coeffs = ellipse_params_to_general_form(center_x, center_y, a, b, angle)
-        parent = create_ellipse_mask_vectorized_perturbed2(
-            w, h, coeffs, 0.7, 39, (row_off, col_off)
-        )
-        parent = _maybe_add_bud(parent, (center_y+row_off, col_off+center_x), (a, b),
-                                rng=rng, prob=bud_prob)
-        uint8_labels[parent] = cell_id
-    return uint8_labels
 """
 mask_bool = create_ellipse_mask_vectorized_perturbed(
                 128, 256, coeffs,
@@ -233,7 +215,7 @@ def render_fluor_image(label_map: np.ndarray,
                        # ---------- GLOBAL -------------
                        sigma_px: float = 1.0,
                        bitdepth: int   = 16,
-                       gamma: float    = 1.2,
+                       gamma: float    = 2,
                        rng=None,
                        # ----------   RIM  -------------
                        rim_dark_amp: float      = -0.03,
@@ -248,7 +230,7 @@ def render_fluor_image(label_map: np.ndarray,
                        # ---------- GRAD NOISE ---------
                        grad_dark_amp: float = 0,#-0.08,
                        # ---------- RANGE --------------
-                       peak_fraction: float = 0.4):
+                       peak_fraction: float = 0.4,  coll_mask_map):
     """
     Flexible yeast‑fluorescence renderer.
 
@@ -256,88 +238,122 @@ def render_fluor_image(label_map: np.ndarray,
     the corresponding noise.
     """
 
-    h, w = label_map.shape
-    img  = np.zeros((h, w), dtype=np.float32)
+    N, h, w = coll_mask_map.shape
+    masks_bool = coll_mask_map.astype(bool)
 
     if rng is None:
         rng = np.random.default_rng()
+    """    coll_fluors_maps =
 
-    # ------------------------------------------------------------------
-    # fluorescence per cell -------------------------------------------------
-    # ------------------------------------------------------------------
+    min_vals = np.where(count > 0,
+                        safe_stack.min(axis=0),  # pixel‑wise min over N
+                        0.0).astype(np.float32)"""
+    #
+    # fluorescence per cell
     fluors = np.asarray(metadata["fluorescence"], dtype=np.float32)
-    fluors /= fluors.max() + 1e-6
+    fluors_norm = fluors / (fluors.max() + 1e-6)  # (N,)
+    F = fluors_norm[:, None, None]
+    coll_fluor_stack = np.zeros((N, h, w), dtype=np.float32)
+    coll_edge_stack = np.zeros((N, h, w), dtype=np.float32)
 
-    nuc_masks = []
+    coll_nuc_edge_stack = np.zeros((N, h, w), dtype=np.float32)
 
-    for cid in np.unique(label_map):
-        if cid == 0:
+    for idx, mask in enumerate(masks_bool):
+        if not mask.any():
             continue
-        mask = (label_map == cid)
-        F0   = fluors[cid-1]
+        din = distance_transform_edt(mask)  # (h, w) float32
+        r_max = din[mask].max()
+        coll_fluor_stack[idx, mask] = F[idx] * (
+                1.0 - (din[mask] / (r_max + 1e-6)) #** gamma
+        )
+        #CHECK THIS ABOVE ^^^^
+        edges = edge_mask_np(mask)
+        coll_edge_stack[idx, edges] = F[idx]
 
-        # radial profile
-        din  = distance_transform_edt(mask).astype(np.float32)
-        yy, xx = np.nonzero(mask)
-        r_max  = din[yy, xx].max()
-        r_norm = din[yy, xx] / (r_max + 1e-6)
-        img[yy, xx] += F0 * (1.0 - r_norm**gamma)
-
-        # nucleolus geometry
+        #nucleolus darkening
         cy, cx = center_of_mass(mask)
-        a_nuc  = rng.uniform(0.28, 0.34) * r_max
-        b_nuc  = a_nuc * rng.uniform(0.65, 0.90)
-        nuc_mask = ellipse_mask_rot_jitter(
+        a_nuc  = rng.uniform(0.5, 0.84) * r_max
+        b_nuc  = a_nuc * rng.uniform(0.3, 0.73)
+        nuc_m  = ellipse_mask_rot_jitter(
             h, w, (cy, cx), (a_nuc, b_nuc),
-            angle_deg=rng.uniform(0, 180.),
+            angle_deg=rng.uniform(0, 360.),
             jitter=0.4, noise_scale=48,
-            repeat=True, seed=rng.integers(1<<31))
-        img[nuc_mask] *= nuc_core_mul            # base dark
-        nuc_masks.append(nuc_mask)
+            repeat=True, seed=rng.integers(1 << 31),
+        )
+        nuc_mask_in_cell    =   nuc_m   &   mask
+        coll_fluor_stack[idx, nuc_mask_in_cell] *= nuc_core_mul
+        nuc_edges = edge_mask_np(nuc_mask_in_cell)
+        coll_nuc_edge_stack[idx, nuc_edges] = F[idx]
+#fluors /= fluors.max() + 1e-6
+
+    #resolve overlaps
+    overlap_count = masks_bool.sum(axis=0, dtype=np.uint8)           # (h, w)
+
+    # Vectorised masked‑minimum (ignore zeros)
+    safe = np.where(masks_bool, coll_fluor_stack, np.inf)             # (N,h,w)
+    min_vals = np.min(safe, axis=0)
+    min_vals[np.isinf(min_vals)] = 0.0
+
+    img = np.where(overlap_count > 0,
+                   min_vals / overlap_count**3,
+                   0.0).astype(np.float32)
+
 
     # ------------------------------------------------------------------
     # rim‑darkening w/ Perlin
     # ------------------------------------------------------------------
+    print("rim‑darkening w/ Perlin")
+    # ---------- Rim darkening using pre‑computed edge map -----------------
+    """
     if rim_dark_amp != 0.0:
-        dist_out = distance_transform_edt(label_map == 0).astype(np.float32)
-        dist_in  = distance_transform_edt(label_map != 0).astype(np.float32)
-        d_signed = dist_out
-        d_signed[label_map != 0] = -dist_in[label_map != 0]
+        #mplitude‑weighted rim union  (float32, 0-1)
+        rim_amp_map = coll_edge_stack.sum(0)  # (h, w)
 
-        rim_w = np.exp(-((np.abs(d_signed)-0.5)/rim_edge_sigma_px)**2)
-        rim_w *= 1.0 / (1.0 + (dist_out / rim_edge_softness)**2)
+        #smooth -> soft feather
+        rim_w = gaussian_filter(rim_amp_map, rim_edge_sigma_px)
+        rim_w *= 1.0 / (1.0 + (distance_transform_edt(rim_amp_map == 0)
+                               / rim_edge_softness) ** 2)
 
+        #perlin multiplier (same as before)
         res_y = _fit_periods(h, rim_perlin_period)
         res_x = _fit_periods(w, rim_perlin_period)
-        perlin = generate_perlin_noise_2d((h, w), (res_y, res_x),
-                                          tileable=(False, False)
-                                         ).astype(np.float32)
+        perlin = generate_perlin_noise_2d(
+            (h, w), (res_y, res_x), tileable=(False, False)
+        ).astype(np.float32)  # → smooth low‑freq
         perlin = gaussian_filter(perlin, rim_perlin_blur_px)
-        img   *= 1.0 + rim_dark_amp * rim_w * perlin
 
-    # ------------------------------------------------------------------
-    # optics PSF
-    # ------------------------------------------------------------------
-    if hasattr(psfm, "make_psf"):
+        #apply darkening
+        img *= 1.0 + rim_dark_amp * rim_w * perlin
+    """
+    print("optics PSF")
+
+    #------------------------------------------------------------------
+    #optics PSF
+    #------------------------------------------------------------------
+    """if hasattr(psfm, "make_psf"):
         psf = psfm.make_psf([0.0], nx=65, dxy=0.1, NA=1.40,
                             ns=1.33, wvl=0.52).astype(np.float32)[0]
         psf /= psf.sum()
         img  = fftconvolve(img, psf, mode='same')
     else:
         img  = gaussian_filter(img, sigma_px)
-
+    """
     # ------------------------------------------------------------------
     # nucleolus distance fall‑off
     # ------------------------------------------------------------------
+    print("ucleolus distance fall‑off")
+    """
     if nuc_grad_amp != 0.0:
         for nm in nuc_masks:
             dist_nuc = distance_transform_edt(~nm).astype(np.float32)
             decay = np.exp(-(dist_nuc / nuc_decay_px)**2)
-            img[nm] += nuc_grad_amp * (1.0 - decay[nm])
+            img[nm] += nuc_grad_amp * (1.0 - decay[nm])"""
 
-    # ------------------------------------------------------------------
-    # gradient‑linked dark noise
-    # ------------------------------------------------------------------
+    #------------------------------------------------------------------
+    #gradient‑linked dark noise
+    #------------------------------------------------------------------
+    print("gradient-linked dark noise")
+    """
     if grad_dark_amp != 0.0:
         gx = sobel(img, axis=0)
         gy = sobel(img, axis=1)
@@ -345,10 +361,12 @@ def render_fluor_image(label_map: np.ndarray,
         grad /= grad.max() + 1e-6
         dark_noise = rng.standard_normal((h, w)).astype(np.float32)
         img *= 1.0 + grad_dark_amp * grad * np.abs(dark_noise)
-
+    """
     # ------------------------------------------------------------------
     # normalise & sample photon statistics
     # ------------------------------------------------------------------
+    print("norm and sample photon stats")
+
     img -= img.min()
     img /= img.max() / peak_fraction + 1e-6
 
@@ -360,33 +378,12 @@ def render_fluor_image(label_map: np.ndarray,
 rng = default_rng(42)
 
 #parameters
-H = W = 2048
+_H = _W = 2048
 SIGMA_PSF = 1.2           #px  (optics blur)
 BITDEPTH  = 16
 GAMMA     = 0.7
-BUD_PROB  = 1.0           #always add a bud for demo
+BUD_PROB  = 0.7           #always add a bud for demo
 NUCL_RATimage0 = 0.3          #inner dark ellipse as % of mother radius
-
-def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.4):
-    canvas_shape = (H, W)
-    labels = np.zeros(canvas_shape, dtype=np.uint8)
-    row_off, col_off = center_offset(canvas_shape, (h, w))
-
-    indices    = cells_data["indices"]
-    shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
-    locations  = cells_data["location"]    #list of (x, y)
-    rotations  = cells_data["rotation"]    #list of θ in degrees
-
-    for cell_id, (semi_a, semi_b), (center_x, center_y), angle in zip(indices, shapes,    locations, rotations):
-        if cell_id > 255:
-            raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
-        coeffs = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
-        parent = create_ellipse_mask_vectorized_perturbed2(
-            w, h, coeffs, 0.7, 39, (row_off, col_off))
-        parent = _maybe_add_bud(parent, (center_y, center_x), (semi_a, semi_b),
-                                rng=rng, prob=bud_prob)
-        labels[parent] = cell_id
-    return labels
 
 def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
     if rng.random() > prob:
@@ -396,7 +393,44 @@ def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
     bud = ellipse_mask_rot_jitter(*parent_mask.shape, b_cen, b_axes, b_rot,
                                   jitter=0.54, noise_scale=70,
                                   seed=rng.integers(1<<31))
-    return parent_mask | (bud & ~parent_mask)
+    return parent_mask |    bud
+
+def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.6):
+    global _H, _W
+    rng = rng or np.random.default_rng()
+    canvas_shape = (_H, _W)
+    labels = np.zeros(canvas_shape, dtype=np.uint8)
+    row_off, col_off = center_offset(canvas_shape, (h, w))
+
+    indices    = cells_data["indices"]
+    shapes     = cells_data["shape"]       #list of (semi_a, semi_b)
+    locations  = cells_data["location"]    #list of (x, y)
+    rotations  = cells_data["rotation"]    #list of θ in degrees
+
+
+    N, H, W = len(indices), *canvas_shape
+    coll_labels = np.zeros((N, H, W), dtype=np.uint8)
+
+    for idx,    (cell_id, (semi_a, semi_b), (center_x, center_y), angle) \
+            in enumerate(zip(indices, shapes,    locations, rotations)):
+        if cell_id > 255:
+            raise ValueError(f"Cell ID {cell_id} exceeds uint8 range 0‑255")
+
+        ith_Label   =   np.zeros(canvas_shape, dtype=np.uint8)
+
+        coeffs = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
+        parent = create_ellipse_mask_vectorized_perturbed2(
+            w, h, coeffs, 0.7, 39, (row_off, col_off)
+        )
+        parent = _maybe_add_bud(parent, (center_y + row_off, col_off + center_x), (semi_a, semi_b),
+                                rng=rng, prob=BUD_PROB)
+
+#        overlap = mask & (labels != 0)
+#        ith_Label[parent]   =   cell_id
+        coll_labels[idx,parent] = cell_id
+        labels[parent] = cell_id
+    return labels,  coll_labels#, intersection
+
 
 def crop_box(img,dimensions,offset):
     """    Crop a TIFF to a box    """
@@ -411,78 +445,152 @@ def false_yellow_overlay(I16: np.ndarray, *, bitdepth=16,   gain=4.0) -> np.ndar
     map uint16 fluorescence frame to false-yellow RGB (0xCFCF00).
     black background stays black
     """
-    I_norm = I16.astype(np.float32) / (2 ** bitdepth - 1)  #0–1
+    I_norm = I16.astype(np.float32) / (2 ** bitdepth - 1)  #0-1
     I_norm = np.clip(I_norm * gain, 0, 1)  #boost & clip
     rgb_y = np.array([207, 207, 0], dtype=np.float32) / 255.
     return (I_norm[..., None] * rgb_y).astype(np.uint8)
+def inspect_uint8_output(uint8_labels: np.ndarray) -> None:
+    """Pretty‑print basic stats and a small patch of a label image."""
+    print("=== Uint8 Label Array Inspection ===")
+    print(f"Shape        : {uint8_labels.shape}")
+    print(f"Data type    : {uint8_labels.dtype}")
+    print(f"Memory       : {uint8_labels.nbytes} bytes")
+    print(f"Min | Max    : {uint8_labels.min()} | {uint8_labels.max()}")
 
+    unique, counts = np.unique(uint8_labels, return_counts=True)
+    print("\nPixel counts per label:")
+    for label, count in zip(unique, counts):
+        tag = "Background" if label == 0 else f"Cell {label}"
+        print(f"  {tag:11}: {count} px")
+
+    print("\nSample (top‑left 10×10) of raw values:")
+    print(uint8_labels[:10, :10])
 if __name__ == "__main__":
     t0 = time.time()
     w,h = 128,200
     toy = {
-        "indices": list(range(1, 10)),
-        "fluorescence": [1000, 1200, 800, 1500, 900, 1100, 1300, 1400, 950],
-        "size": [15, 18, 14, 20, 16, 17, 19, 18, 15],
-        "shape": [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
-                  (9, 9), (11, 8), (45, 9), (18, 7)],
-        "location": [(30, 25), (30, 75), (40, 80), (60, 30),
-                     (85, 70), (110, 223), (110, 85), (110, 110), (80, 110)],
-        "rotation": [0, 15, -20, 30, 0, 45, -10, 0, 25],
-    }
+            "indices":       list(range(1, 10)),
+            "fluorescence":  [1900, 120, 800, 2500, 900, 1000, 1300, 1700, 950],
+            "size":          [15, 18, 14, 20, 16, 17, 19, 18, 15],
+            "shape":         [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
+                               (9, 9), (11, 8), (45, 9), (18, 7)],
+            "location":      [(30, 25), (30, 50), (40, 80), (60, 30),
+                               (85, 70), (95, 25), (100, 105), (110, 175), (80, 190)],
+            "rotation":      [0, 15, -20, 30, 0, 45, -10, 0, 25],
+        }
     row_offset,col_offset   = center_offset((2048, 2048), (h, w))
     base_file,  _           = os.path.split(os.path.abspath(__file__))
-    mask                    = generate_uint8_labels_with_buds(w, h, toy, rng=rng,
+    mask,   coll_mask_map                    = generate_uint8_labels_with_buds(w, h, toy, rng=rng,
                                            bud_prob=BUD_PROB)
+    inspect_uint8_output(mask)
 
-    cropped_uint8_labels    = canvas_slicer(mask, (h, w), (row_offset, col_offset))
-    cropped_image0_metadata =   save_uint8_labels(cropped_uint8_labels, (h,w), (row_offset, col_offset),toy,f"{base_file}\dump0\cropped_tester_mask")
+    coll_cropped_uint8_labels = np.stack(
+        [canvas_slicer(m, (h, w), (row_offset, col_offset)) for m in coll_mask_map],
+        axis=0  # shape (N, h, w)
+    )
 
-    image0_metadata         =    save_uint8_labels(mask, (h,w), (row_offset, col_offset),toy,f"{base_file}\dump0\mask_tester_mask")
+    cell_ids = np.arange(1, coll_cropped_uint8_labels.shape[0] + 1,
+                         dtype=np.uint16)[:, None, None]
+    label_map = (coll_cropped_uint8_labels * cell_ids).max(axis=0)
 
-
-
-    #image0                      = render_fluor_image(mask,image0_metadata,
-                      #        bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
-    image1 = render_fluor_image(mask,image0_metadata,bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
-    cropped_image0              =  crop_box(image1,(h,w),(row_offset, col_offset))
-
-    #save uncropped and uncropped masks
+    base_filename   = Path(base_file) / "dump0"
+    base_filename.mkdir(exist_ok=True)
 
 
-    imageio.imwrite("demo_fluor.tiff", cropped_image0)                     #training
+
+    image0_metadata = save_uint8_labels(
+        mask, (h, w), (row_offset, col_offset),
+        toy, base_filename / "canvas_tester_mask"
+    )
+
+    cropped_image0_metadata = [
+        save_uint8_labels(
+            np.asarray(arr), (h, w), (row_offset, col_offset),
+            toy, base_filename / f"cropped_tester_mask_{idx + 1:03d}"
+        )
+        for idx, arr in enumerate(coll_cropped_uint8_labels)
+    ]
 
     #Compute ADU min/max
-    fluors = np.array(cropped_image0_metadata["fluorescence"], dtype=np.float32)
-    min_adu, max_adu = fluors.min(), fluors.max()
+    fluors = np.asarray(toy["fluorescence"], dtype=np.float32)
+    min_adu,max_adu = fluors.min(), fluors.max()
 
+
+
+    full_fluor = render_fluor_image(mask, image0_metadata,bitdepth=BITDEPTH,
+                                    gamma=GAMMA, rng=rng,coll_mask_map=coll_mask_map)
+    cropped_fluor = crop_box(full_fluor, (h, w), (row_offset, col_offset))
+    imageio.imwrite("demo_fluor.tiff", cropped_fluor)                     #training
+
+    FLOOR_FRACTION  =   0.00
+    CLIP_FRACTION   =   0.005
     #define a stretch & false‑yellow function in this scope:
-    def false_yellow_ADU(I16, *, min_adu, max_adu, gamma=0.7):
+    def false_yellow_ADU1(I16, *, min_adu, max_adu, gamma=0.7):
         """
-        Linearly stretch I16 from [min_adu..max_adu] → [0..1],
+        Linearly stretch I16 from [min_adu..max_adu]
         apply optional gamma, then false‑color into 0xCFCF00.
         """
         I = I16.astype(np.float32)
         I_norm = np.clip((I - min_adu) / (max_adu - min_adu),0,1)
-        I_norm = I_norm ** (1 / gamma) if gamma != 1.0 else I_norm
+        #I_norm = I_norm ** (1 / gamma) if gamma != 1.0 else I_norm
         rgb_y = np.array([207, 207, 0], dtype=np.float32) / 255.0
         img = (I_norm[..., None] * rgb_y*(2**16-1)).astype(np.uint16)
         return img
+    def false_yellow_ADU(
+            I16: np.ndarray,
+            *,
+            bitdepth: int = 16,
+            gamma: float = 0.7,
+            floor_frac: float = FLOOR_FRACTION,
+            clip_frac: float = CLIP_FRACTION,
+    ) -> np.ndarray:
+        """
+        Percentile-based linear stretch + optional gamma, then false-colour
+        (0 -> black, 1 ->    xCFCF00).  Keeps some separation for dim cells.
 
+        I16         :   uint16 fluorescence frame
+        floor_frac  :   intensity to assign the dimmest non-zero pixel
+        clip_frac   :   ignore top X% brightest pixels when computing max
+        """
+        I = I16.astype(np.float32)
+
+        # --- find robust min / max -------------------------------------------
+        nz = I[I > 0]
+        if nz.size == 0:  # blank frame guard
+            return np.zeros((*I.shape, 3), dtype=np.uint8)
+
+        min_adu = nz.min()
+        max_adu = np.percentile(nz, (1.0 - clip_frac) * 100.0)
+
+        #linear stretch
+        I_lin = np.zeros_like(I, dtype=np.float32)  # bg stays 0
+        nz = I > 0  # mask of non-zero pixels
+        I_lin[nz] = (I[nz] - min_adu) / (max_adu - min_adu + 1e-6)
+        I_lin[nz] = floor_frac + (1.0 - floor_frac) * np.clip(I_lin[nz], 0, 1)
+
+        #optional gamma
+        I_gamma = I_lin ** (1.0 / gamma) if gamma != 1.0 else I_lin
+
+        #false-yellow
+        rgb_y = np.array([207, 207, 0], dtype=np.float32) / 255.0  # 0xCFCF00
+        return (I_gamma[..., None] * rgb_y * ((1 << bitdepth) - 1)).astype(np.uint16)
 
     #ADU‑normalizer
-    vis_yellow = (false_yellow_ADU(cropped_image0, min_adu=min_adu, max_adu=max_adu, gamma=GAMMA)).astype(np.uint16)
+    #vis_yellow = (false_yellow_ADU1(cropped_fluor, min_adu=min_adu, max_adu=max_adu, gamma=GAMMA)).astype(np.uint16)
     #save raw uint16 + false-yellow PNG
+
+    vis_yellow = (false_yellow_ADU1(cropped_fluor,  min_adu=min_adu, max_adu=max_adu)).astype(np.uint16)
     imageio.imwrite("vis_yellow.tiff", vis_yellow, format='TIFF')
 
 
-    vis_rgb = visualize_uint8_labels(cropped_uint8_labels,cropped_image0_metadata,None)
+    vis_rgb = visualize_uint8_labels(coll_cropped_uint8_labels,cropped_image0_metadata,None)
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].imshow(vis_rgb) ;          ax[0].set_title("Label RGB") ; ax[0].axis("off")
     ax[1].imshow(vis_yellow)   ;          ax[1].set_title("False-Yellow I₀") ; ax[1].axis("off")
     plt.tight_layout() ; plt.show()
 
-    print(f"Saved demo_fluor.tiff (uint16) and vis_yellow.png – "
+    print(f"Saved demo_fluor.tiff (uint16) and vis_yellow.png - "
           f"run time {time.time() - t0:.2f}s")
 
 

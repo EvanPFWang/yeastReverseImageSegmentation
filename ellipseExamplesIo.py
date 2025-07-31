@@ -38,7 +38,7 @@ _DOUBLE_TINY = np.finfo(np.float64).tiny    # ≈ 2.23e‑308
 import os
 import json
 import time
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Sequence,   Any
 from    skimage.color   import deltaE_ciede2000
 import cv2
 import imageio
@@ -64,6 +64,7 @@ from  ellipseMath import (
     create_ellipse_mask_vectorized_perturbed,
     generate_uint8_labels,
     generate_uint8_labels_cv2,
+edge_mask_np,
 )
 
 __all__ = [
@@ -81,7 +82,9 @@ __all__ = [
 # I/O HELPERS
 #                                                                           -
 
-def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, metadata, base_filename: str) -> Dict[str, Any]:
+def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset,
+                      metadata: Dict[str, Any] | Sequence[Dict[str, Any]]
+                      , base_filename: str) -> Dict[str, Any]:
     """Save a uint8 label map in four companion formats.
 
     1. Raw binary (`*.uint8`)
@@ -99,21 +102,22 @@ def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, metadata, base
     """
     if uint8_labels.dtype != np.uint8:
         raise TypeError("uint8_labels must be of dtype uint8")
+    base = Path(base_filename)
 
     # 1 — raw canvased  binary
-    uint8_labels.tofile(f"{base_filename}.uint8")
+    uint8_labels.tofile(base.with_suffix(".uint8"))
     print(f"Saved raw binary: {base_filename}.uint8")
 
     # 2 — NumPy .npy
-    np.save(f"{base_filename}.npy", uint8_labels)
+    np.save(base.with_suffix(".npy"), uint8_labels)
     print(f"Saved NumPy array: {base_filename}.npy")
 
     # 3 — PNG (palettised if desired)
-    imageio.imwrite(f"{base_filename}_labels.png", uint8_labels)
+    imageio.imwrite(base.with_name(base.stem + "_labels.png"), uint8_labels)
     print(f"Saved PNG: {base_filename}_labels.png")
 
     # 4 — simple metadata
-    metadata: Dict[str, Any] = {
+    metadata_output: Dict[str, Any] = {
         "width": dimensions[0],
         "height": dimensions[1],
         "dtype": "uint8",
@@ -122,11 +126,25 @@ def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset, metadata, base
         "offset": offset,
         "fluorescence": metadata["fluorescence"],
     }
-    with open(f"{base_filename}_metadata.json", "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+
+    #optionally surface aggregate fluorescence for convenience
+    if isinstance(metadata, dict):                       # single-dict case :contentReference[oaicite:3]{index=3}
+        metadata_output.update(metadata)                        # copy all keys
+        if "fluorescence" in metadata:
+            metadata_output["fluorescence"] = metadata["fluorescence"]
+    else:                                                # sequence of dicts
+        metadata_output["cells"] = list(metadata)               # keep full list
+        # flatten fluorescence values if present
+        #proceeds with fluorescence extraction iff the list is not empty and first dict holds fluor_data
+        if metadata and "fluorescence" in metadata[0]:
+            metadata_output["fluorescence"] = [
+                cell["fluorescence"] for cell in metadata
+            ]
+    with open(base.with_name(base.stem + "_metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(metadata_output, f, indent=2)
     print(f"Saved metadata: {base_filename}_metadata.json")
 
-    return metadata
+    return metadata_output
 
 
 def load_uint8_labels(filename: str, width: int, height: int) -> np.ndarray:
@@ -208,27 +226,51 @@ def colormap_for_cells(unique_labels):
 _DEFAULT_CELL_IDS   =   np.array(range(0,9+1),  np.uint8)
 _DEFAULT_COLORMAP    =   colormap_for_cells(_DEFAULT_CELL_IDS)
 _FALSE_YELLOW   =   tuple(int("#CFCF00".lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
-def visualize_uint8_labels(uint8_labels: np.ndarray,    metadata:   Dict,colormap:  Dict) -> np.ndarray:
-    """Turn a label map into an RGB image using a lookup table.
-    Extra labels beyond the length of the palette receive random colours.
+def visualize_uint8_labels(coll_masks: np.ndarray,    metadata:   Dict,colormap:  Dict) -> np.ndarray:
     """
+    Colour-codes a stack of N binary masks.
+    Returns (rgb, label_img), where
+       rgb        : (H, W, 3) uint8  - visualisation
+       label_img  : (H, W)   uint16 - numeric labels, 0 = background
+    """
+    #validate / stack input
+    if coll_masks.ndim != 3:
+        raise ValueError("masks must have shape (N, H, W)")
+    masks = coll_masks.astype(bool, copy=False)
+    N, H, W = coll_masks.shape
+
+    #build label image (0= background)
+    label_img = np.zeros((H, W), dtype=np.uint16)
+    #vectorised assignment: broadcast cell ids across each mask’s True pixels
+    cell_ids  = np.arange(1, N + 1, dtype=np.uint16)[:, None, None]  # (N,1,1)
+    label_img = (masks * cell_ids).max(axis=0)                       # (H,W)
+
+    #prepare/extend colormap
     if colormap is None:
-        #ASSUME LABELS ARE FROM 1 to N
-        label_idx       =   np.array(metadata["unique_labels"], dtype=int)
-        color_idx       = np.concatenate(([0], label_idx))    #build a full-length colormap of shape (max_label+1, 3)
-        base_colormap   = colormap_for_cells(color_idx)
-
-        max_label       = int(uint8_labels.max())
-        needed = max_label + 1 - base_colormap.shape[0]
-
-        if needed > 0:
-            # add random extras so that base_cmap has enough rows
-            extra = np.random.randint(50, 256, (needed, 3), dtype=np.uint8)
-            colormap = np.vstack([base_colormap, extra])
+        if isinstance(metadata, dict):
+            # single-dict case
+            base_ids = np.asarray(
+                metadata.get("unique_labels", np.arange(1, N + 1)),
+                dtype=int
+            )
         else:
-            colormap = base_colormap
-    # now safe to index
-    return colormap[uint8_labels]
+            # metadata is list/tuple → use order 1…N
+            base_ids = np.arange(1, N + 1, dtype=int)
+
+        palette = colormap_for_cells(np.concatenate(([0], base_ids)))
+    else:
+        palette = colormap
+
+    if palette.shape[0] <= label_img.max():
+        extra = np.random.randint(
+            50, 256,
+            (label_img.max() + 1 - palette.shape[0], 3),
+            dtype=np.uint8
+        )
+        palette = np.vstack([palette, extra])
+
+    rgb = palette[label_img]           # (H, W, 3) uint8
+    return rgb
 
 
 #                                                                           -
@@ -277,7 +319,7 @@ def complete_pipeline(cells_data:    Dict) -> Tuple[np.ndarray, np.ndarray]:
             "shape":         [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
                                (9, 9), (11, 8), (45, 9), (18, 7)],
             "location":      [(30, 25), (30, 50), (40, 80), (60, 30),
-                               (85, 70), (110, 25), (110, 85), (110, 110), (80, 110)],
+                               (85, 70), (95, 25), (100, 85), (110, 110), (80, 110)],
             "rotation":      [0, 15, -20, 30, 0, 45, -10, 0, 25],
         }
 
@@ -378,7 +420,7 @@ if __name__ == "__main__":
 
     # Ensure we have an even number of files
     if len(all_tifs) % 2:
-        raise ValueError("Uneven number of TIFFs – check your directory!")
+        raise ValueError("Uneven number of TIFFs - check your directory!")
 
     pairs = [
         (all_tifs[i], all_tifs[i + 1])  # (mask, image)
