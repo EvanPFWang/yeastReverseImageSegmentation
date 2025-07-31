@@ -81,7 +81,7 @@ def add_bud_random_rotation(parent_center, parent_axes, *,
     -----
     • `bud_ratio`  ≈ 0.5-0.7 matches measured daughter : mother volume
       ratios 0.5‑0.7 in *S. cerevisiae*:.
-    • `bud_offset` ≥ `bud_ratio·a_p/max` guarantees the bud does **not**
+    • `bud_offset` ≥ `bud_ratio·a_p/max` guarantees the bud doesnot
       cross the mother’s far side.
     """
     eps =   np.finfo(np.float32).eps
@@ -256,14 +256,14 @@ def render_fluor_image(label_map: np.ndarray,
                        rim_perlin_blur_px: int  = -10,
                        #---------- NUCLEOLUS ----------
                        nuc_core_mul: float = 0.01,
-                       # Gradient amplitude controlling a secondary cytoplasmic
-                       # modulation around the nucleolus.  A value of 0 (the
-                       # default) disables this effect.  Positive values
-                       # brighten near the nucleus, negative values darken
-                       # near the nucleus.  When our primary cytoplasmic
-                       # shading (d_norm) is enabled, nuc_grad_amp should
-                       # generally be set to 0.
-                       nuc_grad_amp: float = 0.0,  # default disabled
+                       #Gradient amplitude controlling a secondary cytoplasmic
+                       #modulation around the nucleolus.  A value of 0 (the
+                       #default) disables this effect.  Positive values
+                       #brighten near the nucleus, negative values darken
+                       #near the nucleus.  When our primary cytoplasmic
+                       #shading (d_norm) is enabled, nuc_grad_amp should
+                       #generally be set to 0.
+                       nuc_grad_amp: float = 0.0,  #default disabled
                        nuc_decay_px: float = 11,
                        #---------- GRAD NOISE ---------
                        grad_dark_amp: float = 0,#-0.08,
@@ -303,15 +303,15 @@ def render_fluor_image(label_map: np.ndarray,
     """
 
     for idx, mask in enumerate(masks_bool):
-        # Skip empty masks
+        #Skip empty masks
         if not mask.any():
             continue
-        # Distance to the cell boundary (for sizing the nucleolus)
+        #Distance to the cell boundary (for sizing the nucleolus)
         din = distance_transform_edt(mask).astype(np.float32)
         r_max = din[mask].max() if mask.any() else 0.0
 
-        # Place a random nucleolus inside the cell.  Its semi‑axes are
-        # proportional to r_max to ensure it fits within the mother cell.
+        #Place a random nucleolus inside the cell.  Its semi‑axes are
+        #proportional to r_max to ensure it fits within the mother cell.
         cy, cx = center_of_mass(mask)
         a_nuc = rng.uniform(0.5, 0.84) * r_max
         b_nuc = a_nuc * rng.uniform(0.3, 0.73)
@@ -330,10 +330,10 @@ def render_fluor_image(label_map: np.ndarray,
         nuc_mask_in_cell = nuc_m & mask
         coll_nuc_mask_bool[idx, nuc_mask_in_cell] = True
 
-        # Primary cytoplasm shading: use the distance from the nucleolus to
-        # brighten the cytoplasm outward.  Pixels adjacent to the nucleolus
-        # have d_norm≈0 and are dark; pixels at the cell boundary have
-        # d_norm≈1 and are brightest (scaled by the per‑cell base value).
+        #Primary cytoplasm shading: use the distance from the nucleolus to
+        #brighten the cytoplasm outward.  Pixels adjacent to the nucleolus
+        #have d_norm≈0 and are dark; pixels at the cell boundary have
+        #d_norm≈1 and are brightest (scaled by the per‑cell base value).
         d_to_nuc = distance_transform_edt(~nuc_mask_in_cell).astype(np.float32)
         max_d_in_cell = d_to_nuc[mask].max() + 1e-6
         d_norm = d_to_nuc / max_d_in_cell
@@ -341,11 +341,11 @@ def render_fluor_image(label_map: np.ndarray,
         base = F[idx]
         cyto = mask & ~nuc_mask_in_cell
         coll_fluor_stack[idx, cyto] = base * d_norm[cyto]
-        # Darken the nucleolus relative to the cytoplasm
+        #Darken the nucleolus relative to the cytoplasm
         coll_fluor_stack[idx, nuc_mask_in_cell] = base * nuc_core_mul
 
-        # Edges: record both cell and nucleolus boundaries for potential
-        # highlighting later
+        #Edges: record both cell and nucleolus boundaries for potential
+        #highlighting later
         edges = edge_mask_np(mask)
         coll_edge_stack[idx, edges] = F[idx]
         nuc_edges = edge_mask_np(nuc_mask_in_cell)
@@ -359,7 +359,7 @@ def render_fluor_image(label_map: np.ndarray,
         for idx in range(N):
             d = distance_transform_edt(~coll_nuc_mask_bool[idx])
             decay[idx] = np.exp(-(d / (nuc_decay_px + 1e-6)) ** 2)
-            """decay_val = per_decay_px[idx] + 1e-6  # avoid divide-by-zero
+            """decay_val = per_decay_px[idx] + 1e-6  #avoid divide-by-zero
             decay[idx] = np.exp(-(d / decay_val) ** 2)"""
         mult      = 1.0 + nuc_grad_amp * decay
         cytoplasm = masks_bool & ~coll_nuc_mask_bool
@@ -650,28 +650,28 @@ if __name__ == "__main__":
             A 3D array of shape (H,W,3) with dtype ``uint16`` containing
             the false‑colour yellow representation of the input image.
         """
-        # Cast to float for calculations
+        #Cast to float for calculations
         I = I16.astype(np.float32)
-        # Extract non‑zero pixels; if none, return a black RGB image
+        #Extract non‑zero pixels; if none, return a black RGB image
         nz = I[I > 0]
         if nz.size == 0:
             return np.zeros((*I.shape, 3), dtype=np.uint16)
-        # Determine stretch range
+        #Determine stretch range
         min_adu = nz.min()
         max_adu = np.percentile(nz, (1.0 - clip_frac) * 100.0)
         denom = max(max_adu - min_adu, 1e-6)
-        # Linear normalisation to [0,1]
+        #Linear normalisation to [0,1]
         I_lin = np.zeros_like(I, dtype=np.float32)
         mask_nz = I > 0
         I_lin[mask_nz] = (I[mask_nz] - min_adu) / denom
         I_lin[mask_nz] = np.clip(I_lin[mask_nz], 0.0, 1.0)
-        # Reserve a fraction for dim cells
+        #Reserve a fraction for dim cells
         if floor_frac > 0.0:
             I_lin[mask_nz] = floor_frac + (1.0 - floor_frac) * I_lin[mask_nz]
-        # Optional gamma correction
+        #Optional gamma correction
         if gamma != 1.0:
             I_lin = I_lin ** (1.0 / gamma)
-        # False‑yellow encoding: scale greyscale values into RGB
+        #False‑yellow encoding: scale greyscale values into RGB
         rgb_y = np.array([207, 207, 0], dtype=np.float32) / 255.0
         out = I_lin[..., None] * rgb_y * ((1 << bitdepth) - 1)
         return out.astype(np.uint16)
