@@ -17,6 +17,11 @@ import math
 import ellipseExamplesIo
 import ellipseMath
 
+
+
+from matplotlib.colors import ListedColormap, BoundaryNorm, LinearSegmentedColormap
+
+
 print("Done Importing")
 from scipy import ndimage
 from perlin_numpy import generate_perlin_noise_2d
@@ -43,7 +48,7 @@ from ellipseMath import     (_fit_periods,
                             ellipse_params_to_general_form,
                             create_ellipse_mask_vectorized_perturbed2,
                              center_offset,edge_mask_np)
-from ellipseExamplesIo import   (visualize_uint8_labels,
+from ellipseExamplesIo import   (#visualize_uint8_labels,
                                 save_uint8_labels,
                                 n_spaced_lab,
                                 order_for_gradient,
@@ -52,7 +57,7 @@ from ellipseExamplesIo import   (visualize_uint8_labels,
                                 palette_to_strip,
                                 colormap_for_cells,
                                 canvas_slicer)
-
+from ellipseExamplesIoPalletteTester    import  visualize_uint8_labels
 
 _FALSE_YELLOW   =   tuple(int("#CFCF00".lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
 
@@ -79,13 +84,13 @@ def add_bud_random_rotation(parent_center, parent_axes, *,
 
     Notes
     -----
-    • `bud_ratio`  ≈ 0.5-0.7 matches measured daughter : mother volume
+      `bud_ratio`  ≈ 0.5-0.7 matches measured daughter : mother volume
       ratios 0.5‑0.7 in *S. cerevisiae*:.
-    • `bud_offset` ≥ `bud_ratio·a_p/max` guarantees the bud doesnot
+      `bud_offset` ≥ `bud_ratio·a_p/max` guarantees the bud doesnot
       cross the mother’s far side.
     """
     eps =   np.finfo(np.float32).eps
-    delta_deg_max: float = 23.0
+    delta_deg_max: float = 19.0
 
 
     parent_center_y, parent_center_x   = parent_center
@@ -113,7 +118,8 @@ def add_bud_random_rotation(parent_center, parent_axes, *,
     denom   = (ux/a_semi_bud)**2 + (uy/b_semi_bud)**2
     s_touch = 1.0 / math.sqrt(denom + eps)  #max_sensible offfset
 
-    sigma_off = s_touch / 1.96                    #2-sided 95 % quantile
+    sigma_off = s_touch / 3.92                    #2-sided{1.96} 95 % quantile
+                                                    #{2.94}
     r_off     = np.abs(rng.normal(0.0, sigma_off))
     r_off     = min(r_off, s_touch)               #clamp overshoot
 
@@ -229,8 +235,7 @@ def _maybe_add_bud(parent_mask, parent_center, parent_axes, *,
     return parent_mask | bud_only
 
 
-"""
-mask_bool = create_ellipse_mask_vectorized_perturbed(
+"""mask_bool = create_ellipse_mask_vectorized_perturbed(
                 128, 256, coeffs,
                 roughness=0.1,      #set 0 for perfect ellipse
                 jitter=0.15,         #relative edge amplitude
@@ -263,7 +268,7 @@ def render_fluor_image(label_map: np.ndarray,
                        #near the nucleus.  When our primary cytoplasmic
                        #shading (d_norm) is enabled, nuc_grad_amp should
                        #generally be set to 0.
-                       nuc_grad_amp: float = 0.0,  #default disabled
+                       nuc_grad_amp: float = -2,  #-0.25default disabled
                        nuc_decay_px: float = 11,
                        #---------- GRAD NOISE ---------
                        grad_dark_amp: float = 0,#-0.08,
@@ -298,9 +303,9 @@ def render_fluor_image(label_map: np.ndarray,
     coll_nuc_mask_bool     = np.zeros((N, h, w), dtype=bool)
     coll_nuc_mask_Fluor_list = np.zeros((N, h, w), dtype=np.float32)
     coll_nuc_edge_stack = np.zeros((N, h, w), dtype=np.float32)
-    """
+
     per_decay_px = np.empty(N, dtype=np.int32)
-    """
+
 
     for idx, mask in enumerate(masks_bool):
         #Skip empty masks
@@ -316,10 +321,7 @@ def render_fluor_image(label_map: np.ndarray,
         a_nuc = rng.uniform(0.5, 0.84) * r_max
         b_nuc = a_nuc * rng.uniform(0.3, 0.73)
 
-        """
-        decay_px = rng.integers(1, int(b_nuc) + 1)
-        per_decay_px[idx] = decay_px
-        """
+        per_decay_px[idx] = r_max#rng.integers(1, int(0.75*b_nuc) + 1)
 
         nuc_m = ellipse_mask_rot_jitter(
             h, w, (cy, cx), (a_nuc, b_nuc),
@@ -353,17 +355,37 @@ def render_fluor_image(label_map: np.ndarray,
         coll_nuc_mask_Fluor_list[idx, nuc_mask_in_cell] = nuc_core_mul
 
 
+
+
+    #determine tail FATNESS by beta
+    beta = 0.02
+    #by stretch
     #nucleolus gradient CYTOPLASM ONLY
     if nuc_grad_amp != 0.0:
         decay = np.empty_like(coll_fluor_stack, dtype=np.float32)
+
+        #beta < 1 => fat-tailed   (0.5 is a good starting point)
+        beta_tail = 1
+        stretch =   2
         for idx in range(N):
-            d = distance_transform_edt(~coll_nuc_mask_bool[idx])
-            decay[idx] = np.exp(-(d / (nuc_decay_px + 1e-6)) ** 2)
-            """decay_val = per_decay_px[idx] + 1e-6  #avoid divide-by-zero
-            decay[idx] = np.exp(-(d / decay_val) ** 2)"""
-        mult      = 1.0 + nuc_grad_amp * decay
+            #Distance from every pixel to this cell’s nucleolus
+            d = distance_transform_edt(~coll_nuc_mask_bool[idx]).astype(np.float32)
+
+            #Use r_max for this cell as the 1-sigma scale so the curve
+            #naturally reaches 0 at the boundary
+            r_max = per_decay_px[idx] + 1e-6  #already set above
+            g = np.exp(-(d*stretch / r_max) ** beta_tail)  #0 <= g <=> 1
+
+            #Build multiplier:
+            #t d = 0   -> mult = nuc_core_mul  (same darkness as inside)
+            #  at d = r_max → mult almost 1          (no extra darkening)
+            mult = nuc_core_mul + (1.0 - nuc_core_mul) * (1.0 - g)
+
+            decay[idx] = mult
+
+        #Apply ONLY to cytoplasm pixels
         cytoplasm = masks_bool & ~coll_nuc_mask_bool
-        coll_fluor_stack[cytoplasm] *= mult[cytoplasm]
+        coll_fluor_stack[cytoplasm] *= decay[cytoplasm]
 
     #resolve overlaps
     overlap_count = masks_bool.sum(axis=0, dtype=np.uint8)
@@ -425,7 +447,6 @@ def render_fluor_image(label_map: np.ndarray,
     """
     #------------------------------------------------------------------
     #normalise & sample photon statistics
-    #------------------------------------------------------------------
     print("norm and sample photon stats")
 
     img -= img.min()
@@ -592,17 +613,14 @@ if __name__ == "__main__":
     FLOOR_FRACTION  =   0.01
     CLIP_FRACTION   =   0.005
     #define a stretch & false‑yellow function in this scope:
-    def false_yellow_ADU1(I16, *, min_adu, max_adu, gamma=1):
-        """
-        Linearly stretch I16 from [min_adu..max_adu]
-        apply optional gamma, then false‑color into 0xCFCF00.
-        """
+    """def false_yellow_ADU1(I16, *, min_adu, max_adu, gamma=1):
+        #       Linearly stretch I16 from [min_adu..max_adu]        apply optional gamma, then false‑color into 0xCFCF00.
         I = I16.astype(np.float32)
         I_norm = np.clip((I - min_adu) / (max_adu - min_adu),0,1)
         #I_norm = I_norm ** (1 / gamma) if gamma != 1.0 else I_norm
         rgb_y = np.array([245, 245, 0], dtype=np.float32) / 255.0
         img = (I_norm[..., None] * rgb_y*(2**16-1)).astype(np.uint16)
-        return img
+        return img"""
     def false_yellow_ADU(
             I16: np.ndarray,
             *,
@@ -611,45 +629,6 @@ if __name__ == "__main__":
             floor_frac: float = 0.0,
             clip_frac: float = 0.0,
     ) -> np.ndarray:
-        """
-        Map a uint16 fluorescence frame to a false‑yellow RGB image.  This
-        function performs a linear intensity stretch between the robust
-        minimum and maximum (optionally clipping the brightest fraction
-        of pixels), applies an optional gamma correction, then encodes the
-        result into the yellow colour channel (0xCFCF00).  The background
-        (zero values) remains black.  Setting ``gamma`` greater than 1.0
-        compresses the dynamic range of bright pixels, while values less
-        than 1.0 expand it.  ``floor_frac`` reserves a fraction of the
-        dynamic range for the dimmest non‑zero pixels, separating dim
-        cells from the true background.
-
-        Parameters
-        ----------
-        I16 : np.ndarray
-            The 2D fluorescence image (uint16) to convert.
-        bitdepth : int, optional
-            Bit depth of the output RGB channels (default 16 bits).
-        gamma : float, optional
-            Gamma exponent applied after linear normalisation.  The default
-            of 0.5 brightens dim pixels relative to bright ones, enhancing
-            contrast between cells of differing fluorescence.  Values
-            greater than 1.0 darken bright pixels; values less than 1.0
-            brighten them.
-        floor_frac : float, optional
-            Fraction of the dynamic range to assign to the dimmest non‑zero
-            pixels.  Defaults to 0.0 so that the minimum non‑zero value
-            maps to zero.
-        clip_frac : float, optional
-            Fraction of the brightest pixels to ignore when computing the
-            maximum.  This guards against a few saturated pixels dominating
-            the stretch.  Defaults to 0.0 (no clipping).
-
-        Returns
-        -------
-        np.ndarray
-            A 3D array of shape (H,W,3) with dtype ``uint16`` containing
-            the false‑colour yellow representation of the input image.
-        """
         #Cast to float for calculations
         I = I16.astype(np.float32)
         #Extract non‑zero pixels; if none, return a black RGB image
@@ -680,12 +659,115 @@ if __name__ == "__main__":
     #vis_yellow = (false_yellow_ADU1(cropped_fluor, min_adu=min_adu, max_adu=max_adu, gamma=GAMMA)).astype(np.uint16)
     #save raw uint16 + false-yellow PNG
 
+
+
     vis_yellow = (false_yellow_ADU(cropped_fluor)).astype(np.uint16)
-    imageio.imwrite("vis_yellow.tiff", vis_yellow, format='TIFF')
+    imageio.imwrite("FALSEDONTLOOKTHISISWRONGvis_yellow.tiff", vis_yellow, format='TIFF')
+
+    vis_rgb, palette = visualize_uint8_labels(
+        coll_cropped_uint8_labels,
+        cropped_image0_metadata,
+        None  #pass a ready-made palette only if you want to override
+    )
+    #vis_rgb = visualize_uint8_labels(coll_cropped_uint8_labels,cropped_image0_metadata,None)
 
 
-    vis_rgb = visualize_uint8_labels(coll_cropped_uint8_labels,cropped_image0_metadata,None)
 
+
+
+
+
+h,w = vis_rgb.shape[:2]           #(H,W,3)
+
+fig = plt.figure(figsize=(11, 5))
+gs  = fig.add_gridspec(
+    1, 3,
+    width_ratios=[1, 1, 0.05],     #last slice = narrow colour-bar
+    wspace=0.07
+)
+
+ax0  = fig.add_subplot(gs[0])      #label image
+ax1  = fig.add_subplot(gs[1])      #fluor image
+
+print("vis_rgb")
+im0 = ax0.imshow(
+    vis_rgb,
+    origin="upper",
+    extent=[0, w - 1, 0, h - 1]
+)
+ax0.set_title("Label RGB")
+ax0.set_xlabel("x [pixels]")
+ax0.set_ylabel("y [pixels]")
+
+#------------------------------------------------------------------
+#(D)  FLUOR (false-yellow) panel  (same extent/origin)
+#------------------------------------------------------------------
+    #Display the false‑yellow fluorescence image with the same origin and extent
+    #as the label image.  Using origin="upper" and specifying the extent
+    #ensures that the y‑axis increases downward, matching the conventional
+    #orientation of the synthetic images.  Without this, the cells appear
+    #flipped vertically.
+print("fluor_rgb")
+
+rgb_y   =   np.array([207, 207, 0], dtype=np.float32) / 255.0
+DISPLAY_MAX_ADU =   2500
+rgb_y_fluor_save_as =   cropped_fluor.astype(np.uint16)
+
+vis_fluor_disp = np.clip(
+    (cropped_fluor.astype(np.float32) / DISPLAY_MAX_ADU)[..., None] * rgb_y,
+    0.0, 1.0
+)
+imageio.imwrite("rgb_y_fluor_save_as.tiff", rgb_y_fluor_save_as, format='TIFF')
+imageio.imwrite("vis_fluor_disp.tiff", vis_fluor_disp, format='TIFF')
+
+
+im1 = ax1.imshow(
+    vis_fluor_disp,
+    origin="upper",
+    extent=[0, w - 1, 0, h - 1]
+)
+ax1.set_title(f"False-yellow $I_0$  (≤{DISPLAY_MAX_ADU:.0f} ADU → full)")
+ax1.set_xlabel("x [pixels]")
+ax1.set_ylabel("y [pixels]")
+
+
+box0 = ax0.get_position()
+box1 = ax1.get_position()
+
+bar_w   = 0.02          # colour-bar width (fraction of fig)
+pad_out = 0.01          # gap between panel and bar
+
+# ● Label-ID bar (beside ax0, just right of it) --------------
+cax0 = fig.add_axes([box0.x1 + pad_out,  box0.y0,  bar_w,  box0.height])
+
+cmap_lbl = ListedColormap(palette / 255.0, name="cellmap")
+norm_lbl = BoundaryNorm(np.arange(palette.shape[0]+1)-0.5, cmap_lbl.N)
+
+fig.colorbar(
+    plt.cm.ScalarMappable(norm=norm_lbl, cmap=cmap_lbl),
+    cax=cax0, ticks=np.arange(palette.shape[0])
+).ax.set_ylabel("cell_id", rotation=-90, va="bottom")
+cax0.invert_yaxis()
+
+# ● Black→yellow ADU bar (beside ax1, just right of it) -------
+from matplotlib.colors import LinearSegmentedColormap
+bk_y_cmap = LinearSegmentedColormap.from_list(
+    "bk-y", [(0, 0, 0), (207/255, 207/255, 0)], N=256
+)
+
+cax1 = fig.add_axes([box1.x1 + pad_out,  box1.y0,  bar_w,  box1.height])
+fig.colorbar(
+    plt.cm.ScalarMappable(norm=plt.Normalize(0, DISPLAY_MAX_ADU),
+                          cmap=bk_y_cmap),
+    cax=cax1
+).ax.set_ylabel("ADU", rotation=-90, va="bottom")
+
+# ────────────────────────────────────────────────────────────
+plt.tight_layout()
+plt.show()
+
+
+"""
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].imshow(vis_rgb) ;          ax[0].set_title("Label RGB") ; ax[0].axis("off")
     ax[1].imshow(vis_yellow)   ;          ax[1].set_title("False-Yellow I₀") ; ax[1].axis("off")
@@ -697,4 +779,4 @@ if __name__ == "__main__":
 
 
 
-    plt.imshow(vis_rgb); plt.axis("off")
+    plt.imshow(vis_rgb); plt.axis("off")"""
