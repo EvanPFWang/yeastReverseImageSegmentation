@@ -699,7 +699,7 @@ def render_fluor_image_modular_vec_v2(
                 scaled = ellipse_mask_rot_jitter(
                     H, W, (cy, cx),
                     (c_axes[0] * 0.7, c_axes[1] * 0.7),#RETURN HERE
-                    angle_deg=float(rng.uniform(0.0, 360.0)),
+                    angle_deg=np.float32(rng.uniform(0.0, 360.0)),
                     jitter=0.3, noise_scale=32, repeat=True,
                     seed=int(rng.integers(1 << 31)),
                 )
