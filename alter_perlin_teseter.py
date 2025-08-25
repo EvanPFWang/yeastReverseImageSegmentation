@@ -58,7 +58,7 @@ from ellipseExamplesIo import   (visualize_uint8_labels,
                                 canvas_slicer)
 
 
-_FALSE_YELLOW   =   tuple(int("#CFCF00".lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+_FALSE_YELLOW   =   tuple(int("#CFCF00".lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
 
 notebook_directory = os.getcwd()
 
@@ -163,7 +163,7 @@ def ellipse_mask_rot_jitter(h, w, center, axes, angle_deg: float,
     center_y, center_x = center
     a,  b  = axes
     tiny32 = np.finfo(np.float32).tiny
-    #convert world offsets -> body frame (x',y')  (StackOverflow rotation)
+    #convert world offsets -> body frame (x",y")  (StackOverflow rotation)
     dy, dx = yy - center_y, xx - center_x
     phi      = np.deg2rad(angle_deg, dtype=np.float32)
     cosphi, sinphi = np.cos(phi), np.sin(phi)
@@ -307,7 +307,7 @@ def nucHELPER2_apply_fluor(mask, nuc_mask_in_cell, din, r_max, base_fluor, nuc_c
     Vectorized fluor shading and edge extraction.
     Inputs:
       mask, nuc_mask_in_cell: bool (H,W)
-      din: float32 (H,W) distance-to-background inside 'mask' (from helper 1)
+      din: float32 (H,W) distance-to-background inside "mask" (from helper 1)
       r_max: float scalar
       base_fluor: scalar or (1,1) array – broadcasts over (H,W)
     Returns:
@@ -550,7 +550,7 @@ def render_fluor_image(label_map: np.ndarray,
         psf = psfm.make_psf([0.0], nx=65, dxy=0.1, NA=1.40,
                             ns=1.33, wvl=0.52).astype(np.float32)[0]
         psf /= psf.sum()
-        img  = fftconvolve(img, psf, mode='same')
+        img  = fftconvolve(img, psf, mode="same")
     else:
         img  = gaussian_filter(img, sigma_px)
     """
@@ -597,6 +597,186 @@ def render_fluor_image(label_map: np.ndarray,
     counts  = np.clip(counts, 0, (1<<bitdepth)-1).astype(np.uint16)
 
     return counts
+def render_fluor_image_modular_vec_v2(
+        label_map: np.ndarray,
+        metadata: dict,
+        coll_mask_map: np.ndarray,
+        child_info,  # kept for API parity
+        coll_bud_only_mask_map: np.ndarray,
+        *,
+        # ---------- GLOBAL -------------
+        sigma_px: float = 1.0,
+        bitdepth: int = 16,
+        gamma: float = 2.0,
+        rng=None,
+        # ----------   RIM  -------------
+        rim_dark_amp: float = -0.1,
+        rim_edge_sigma_px: float = 2.0,
+        rim_edge_softness: float = 0.1,
+        rim_perlin_period: float = 0.1,
+        rim_perlin_blur_px: int = -10,
+        # ---------- NUCLEOLUS ----------
+        nuc_core_mul: float = 0.1,
+        nuc_grad_amp: float = -2.0,
+        nuc_decay_px: float = 4.0,
+        # ---------- GRAD NOISE ---------
+        grad_dark_amp: float = 0.0,
+        # ---------- RANGE --------------
+        peak_fraction: float = 0.4,
+):
+    """
+    Vectorization-first yeast fluorescence renderer.
+
+    Stores per-cell nucleolus masks explicitly as role-pairs:
+        coll_nuc_mask_bool_pairs[i] == (nuc_parent_mask_bool, nuc_child_mask_bool)
+    Uses
+    (nucHELPER1_generate_nucleolus_mask,
+    nucHELPER2_apply_fluorescence,nuCytoTransformerHelper_apply_gradient)
+    Everything else vectorized via NumPy broadcasting/boolean indexing
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    #shapes/typed masks
+    N, H, W = coll_mask_map.shape
+    masks_bool = coll_mask_map.astype(bool, copy=False)  # (N,H,W)
+    buds_bool = coll_bud_only_mask_map.astype(bool, copy=False)  # (N,H,W)
+
+    #role masks (vectorized)
+    parent_bool = masks_bool & ~buds_bool
+    child_bool = buds_bool
+
+    #base fluorescence (vectorized over (H,W) via broadcasting)
+    F_scalar = np.asarray(metadata["fluorescence"], dtype=np.float32)  #(N,)
+    den = np.float32(F_scalar.max())
+    if den < 1e-12:  #mirror safe_divide
+        raise ZeroDivisionError("fluorescence.max() too small for stable normalization")
+    F = (F_scalar / den).reshape(N, 1, 1)  # (N,1,1)
+
+    #preallocate stacks (contiguous, broadcast-friendly)
+    coll_fluor_stack = np.zeros((N, H, W), dtype=np.float32)
+    coll_edge_stack = np.zeros((N, H, W), dtype=np.float32)
+    coll_nuc_edge_stack = np.zeros((N, H, W), dtype=np.float32)
+    coll_nuc_mask_bool = np.zeros((N, H, W), dtype=bool)
+    coll_nuc_mask_Fluor_list = np.zeros((N, H, W), dtype=np.float32)
+
+    #role-sep nucleoli masks
+    nuc_parent_stack = np.zeros((N, H, W), dtype=bool)
+    nuc_child_stack = np.zeros((N, H, W), dtype=bool)
+
+    #single loop over EXISTING cells
+    active = np.flatnonzero(masks_bool.reshape(N, -1).any(axis=1))
+    for i in active:
+        pmask = parent_bool[i]  #(H,W) parent cytoplasm
+        cmask = child_bool[i]  #(H,W) bud cyto
+
+        #parent_nuc + fluor
+        if pmask.any():
+            p_nuc, din_p, rmax_p, p_ctr, p_axes = nucHELPER1_generate_nucleolus_mask(
+                pmask, H, W, rng
+            )
+            nuc_parent_stack[i] = p_nuc
+
+            p_fluor, p_edges, p_nuc_edges, p_nuc_f = nucHELPER2_apply_fluor(
+                pmask, p_nuc, din_p, rmax_p, F[i], nuc_core_mul
+            )
+
+            coll_fluor_stack[i] += p_fluor
+            coll_edge_stack[i, p_edges] = F[i]  #broadcast (1,1)→(H,W)
+            coll_nuc_edge_stack[i, p_nuc_edges] = F[i]
+            coll_nuc_mask_bool[i, p_nuc] = True
+            coll_nuc_mask_Fluor_list[i, p_nuc] = nuc_core_mul
+
+        #bud_nuc + fluor
+        if cmask.any():
+            c_nuc, din_c, rmax_c, c_ctr, c_axes = nucHELPER1_generate_nucleolus_mask(
+                cmask, H, W, rng
+            )
+
+            #opt slightly smaller/more jittered bud nucleolus
+            if rmax_c > 0 and c_nuc.any():
+                cy, cx = c_ctr
+                scaled = ellipse_mask_rot_jitter(
+                    H, W, (cy, cx),
+                    (c_axes[0] * 0.7, c_axes[1] * 0.7),#RETURN HERE
+                    angle_deg=float(rng.uniform(0.0, 360.0)),
+                    jitter=0.3, noise_scale=32, repeat=True,
+                    seed=int(rng.integers(1 << 31)),
+                )
+                c_nuc = scaled & cmask
+
+            nuc_child_stack[i] = c_nuc
+
+            c_base = F[i] * 0.8  #dimmer buds
+            c_fluor, c_edges, c_nuc_edges, c_nuc_f = nucHELPER2_apply_fluor(
+                cmask, c_nuc, din_c, rmax_c, c_base, nuc_core_mul
+            )
+
+            coll_fluor_stack[i] += c_fluor
+            coll_edge_stack[i, c_edges] = c_base
+            coll_nuc_edge_stack[i, c_nuc_edges] = c_base
+            coll_nuc_mask_bool[i, c_nuc] = True
+            coll_nuc_mask_Fluor_list[i, c_nuc] = nuc_core_mul
+
+        #gradient pass per-cell uses vectorized masks)
+        if nuc_grad_amp != 0.0:
+            #parent cyto gradient
+            if pmask.any() and nuc_parent_stack[i].any():
+                mod = nuCytoTransformerHelper_apply_gradient(
+                    coll_fluor_stack[i], pmask, nuc_parent_stack[i],
+                    nuc_grad_amp, nuc_decay_px
+                )
+                #write back only cytoplasm region (bool assignment vectorized)
+                p_cyto = pmask & ~nuc_parent_stack[i]
+                coll_fluor_stack[i, p_cyto] = mod[p_cyto]
+
+            #bud cyto gradient
+            if cmask.any() and nuc_child_stack[i].any():
+                mod = nuCytoTransformerHelper_apply_gradient(
+                    coll_fluor_stack[i], cmask, nuc_child_stack[i],
+                    nuc_grad_amp * 1.5, nuc_decay_px * 0.5
+                )
+                c_cyto = cmask & ~nuc_child_stack[i]
+                coll_fluor_stack[i, c_cyto] = mod[c_cyto]
+
+    overlap_count = masks_bool.sum(axis=0, dtype=np.uint8)  #(H,W)
+
+    #masked min across cells (treat out-of-cell as +inf)
+    safe = np.where(masks_bool, coll_fluor_stack, np.inf)  #(N,H,W)
+    min_vals = np.min(safe, axis=0)  #(H,W)
+    min_vals[np.isinf(min_vals)] = 0.0
+
+    #min / overlap_count when covered
+    img = np.where(overlap_count > 0, min_vals / overlap_count, 0.0).astype(np.float32)
+
+    #norm & photon statistics (broadcasted)
+    imax = np.float32(img.max())
+    imin = np.float32(img.min())
+    if peak_fraction <= 0:
+        raise ValueError("peak_fraction must be > 0")
+    if imax < 1e-12:
+        raise ZeroDivisionError("img.max() is ~0; cannot normalize stably")
+
+    img -= imin
+    img /= (imax / peak_fraction)
+
+    #zero background in one vectorized step
+    img[~masks_bool.any(axis=0)] = 0.0
+
+    #numerical hygiene
+    img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
+    img = np.clip(img, 0.0, 1.0)
+
+    #poisson draw for the whole image at once (broadcasted)
+    lam = img * ((1 << bitdepth) - 1)
+    counts = rng.poisson(lam).astype(np.int32)
+    counts = np.clip(counts, 0, (1 << bitdepth) - 1).astype(np.uint16)
+
+    #paired nucleolus masks per cell (parent, child)
+    coll_nuc_mask_bool_pairs = [(nuc_parent_stack[i], nuc_child_stack[i]) for i in range(N)]
+    return counts, coll_nuc_mask_bool_pairs
+
+
 rng = default_rng(42)
 
 #parameters
@@ -742,10 +922,17 @@ if __name__ == "__main__":
     min_adu,max_adu = fluors.min(), fluors.max()
 
 
-
-    full_fluor = render_fluor_image(mask, image0_metadata,bitdepth=BITDEPTH,
-                                    gamma=GAMMA, rng=rng,coll_mask_map=coll_mask_map,
-                                    child_info=child_info, coll_bud_only_mask_map=coll_bud_only_mask_map)
+    """        
+        label_map: np.ndarray,
+        metadata: dict,
+        coll_mask_map: np.ndarray,
+        child_info,  # kept for API parity
+        coll_bud_only_mask_map: np.ndarray,
+        *,
+    """
+    full_fluor = render_fluor_image_modular_vec_v2(mask, image0_metadata,coll_mask_map=coll_mask_map,
+                                    child_info=child_info, coll_bud_only_mask_map=coll_bud_only_mask_map,
+                                                   bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
     cropped_fluor = crop_box(full_fluor, (h, w), (row_offset, col_offset))
     imageio.imwrite("demo_fluor.tiff", cropped_fluor)                     #training
 
@@ -807,7 +994,7 @@ if __name__ == "__main__":
     #save raw uint16 + false-yellow PNG
 
     vis_yellow = (false_yellow_ADU(cropped_fluor)).astype(np.uint16)
-    imageio.imwrite("vis_yellow.tiff", vis_yellow, format='TIFF')
+    imageio.imwrite("vis_yellow.tiff", vis_yellow, format="TIFF")
 
 
     vis_rgb = visualize_uint8_labels(coll_cropped_uint8_labels,cropped_image0_metadata,None)
