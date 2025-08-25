@@ -317,9 +317,12 @@ def render_fluor_image(label_map: np.ndarray,
     coll_nuc_mask_Fluor_list = np.zeros((N, h, w), dtype=np.float32)
     coll_nuc_edge_stack = np.zeros((N, h, w), dtype=np.float32)
     #coll_nuc_mask_bool, coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
+
+
     for idx, mask in enumerate(masks_bool):
         if not mask.any():
             continue
+        #ALERT 1 STARTS HERE: nucHELPER1 gives coll_nuc_mask_bool
         din = distance_transform_edt(mask)  #distance of each point from the background (h, w) float32
         r_max = din[mask].max()#max distance of each point from the background
         #nucleolus mask
@@ -332,6 +335,7 @@ def render_fluor_image(label_map: np.ndarray,
             jitter=0.4, noise_scale=48,
             repeat=True, seed=rng.integers(1 << 31),
         )
+
         #coll_nuc_mask_bool, coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
         #   nuc_mask_in_cell
         """nuc_m"""# from_mask(mask, (din,r_max)), dims(h,w), (idx, (a_parent, b_parent),CoM(parent_cy,parent_cx), parent_rot)
@@ -339,10 +343,12 @@ def render_fluor_image(label_map: np.ndarray,
         nuc_mask_in_cell = nuc_m & mask
         coll_nuc_mask_bool[idx, nuc_mask_in_cell] = True
 
+        #ALERT 1 ENDS HERE: nucHELPER1 gives coll_nuc_mask_bool
         #give nucleolus
 
 
         # 3) cytoplasm shading -------------------------------------------
+        #ALERT 2 STARTS HERE: nucHELPER2 gives coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
         base = F[idx]
         cyto = mask & ~nuc_m
         coll_fluor_stack[idx, cyto] = base * (1.0 - din[cyto] / (r_max + 1e-6))
@@ -363,8 +369,12 @@ def render_fluor_image(label_map: np.ndarray,
         #   mask yields din,r_max,         edges = edge_mask_np(mask)
         #   F yields base, cyto
         """coll_fluor_stack""" #((din,r_max),(base, cyto)_, nuc_core_mul
+        #ALERT 2 ENDS HERE: nucHELPER2 gives coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
 
+    #nuCytoTransformerHelper takes in coll_fluor_stack, ()
+    #ALERT 3 STARTS HERE: nuCytoTransformerHelper gives decay
     #nucleolus gradient CYTOPLASM ONLY
+    #takes in
     if nuc_grad_amp != 0.0:
         decay = np.empty_like(coll_fluor_stack, dtype=np.float32)
         for idx in range(N):
