@@ -315,24 +315,25 @@ def nucHELPER2_apply_fluor(mask, nuc_mask_in_cell, din, r_max, base_fluor, nuc_c
       nuc_edges (bool HxW), nuc_fluor_values (float32 HxW)
     """
     #ensure float/broadcast semantics once, up-front
-    base = np.asarray(base_fluor, dtype=np.float32)  #shape () or (1,1) → broadcasts
+    base = np.asarray(base_fluor, dtype=np.float32)  # shape () or (1,1)
+    base_scalar = np.float32(base).item()            # <<< ensure scalar for masked writes
 
     #alloc outputs (contiguous, vectorized writes)
     h, w = mask.shape
     fluor_values = np.zeros((h, w), dtype=np.float32)
     nuc_fluor_values = np.zeros((h, w), dtype=np.float32)
 
-    #cyto (mask \ nucleolus): bright-at-edge via 1 - din/r_max, fused with where()
+    #cyto (mask\nucleolus): bright-at-edge via 1 - din/r_max
     if r_max > 0.0:
         cyto = np.logical_and(mask, np.logical_not(nuc_mask_in_cell))
-        #comp ONLY once; write back masked (no Python loop)
         denom = np.float32(max(r_max, 1e-6))
         cyto_scale = 1.0 - (din / denom)
-        fluor_values[cyto] = (base * cyto_scale)[cyto]
+        # (H,W) on RHS → OK for boolean 1-D indexing
+        fluor_values[cyto] = (base_scalar * cyto_scale)[cyto]
 
     #nucleolus darkening (single masked write)
     if np.any(nuc_mask_in_cell):
-        fluor_values[nuc_mask_in_cell] = base * np.float32(nuc_core_mul)
+        fluor_values[nuc_mask_in_cell] = base_scalar * np.float32(nuc_core_mul)
         nuc_fluor_values[nuc_mask_in_cell] = np.float32(nuc_core_mul)
 
     #edges via 1-px erosion difference (pure morphology; vectorized)
@@ -666,58 +667,55 @@ def render_fluor_image_modular_vec_v2(
 
     #single loop over EXISTING cells
     active = np.flatnonzero(masks_bool.reshape(N, -1).any(axis=1))
-    for i in active:
-        pmask = parent_bool[i]  #(H,W) parent cytoplasm
-        cmask = child_bool[i]  #(H,W) bud cyto
 
-        #parent_nuc + fluor
+    for i in active:
+        pmask = parent_bool[i]
+        cmask = child_bool[i]
+
+        # make a scalar once per cell
+        Fi = np.float32(F[i]).item()
+
+        # ----- parent_nuc + fluor -----
         if pmask.any():
-            p_nuc, din_p, rmax_p, p_ctr, p_axes = nucHELPER1_generate_nucleolus_mask(
-                pmask, H, W, rng
-            )
+            p_nuc, din_p, rmax_p, p_ctr, p_axes = nucHELPER1_generate_nucleolus_mask(pmask, H, W, rng)
             nuc_parent_stack[i] = p_nuc
 
+            # pass scalar Fi to helper
             p_fluor, p_edges, p_nuc_edges, p_nuc_f = nucHELPER2_apply_fluor(
-                pmask, p_nuc, din_p, rmax_p, F[i], nuc_core_mul
+                pmask, p_nuc, din_p, rmax_p, Fi, nuc_core_mul
             )
 
             coll_fluor_stack[i] += p_fluor
-            coll_edge_stack[i, p_edges] = F[i]  #broadcast (1,1)→(H,W)
-            coll_nuc_edge_stack[i, p_nuc_edges] = F[i]
-            coll_nuc_mask_bool[i, p_nuc] = True
-            coll_nuc_mask_Fluor_list[i, p_nuc] = nuc_core_mul
+            coll_edge_stack[i,      p_edges]      = Fi
+            coll_nuc_edge_stack[i,  p_nuc_edges]  = Fi
+            coll_nuc_mask_bool[i,   p_nuc]        = True
+            coll_nuc_mask_Fluor_list[i, p_nuc]    = nuc_core_mul
 
-        #bud_nuc + fluor
+        # ----- bud_nuc + fluor -----
         if cmask.any():
-            c_nuc, din_c, rmax_c, c_ctr, c_axes = nucHELPER1_generate_nucleolus_mask(
-                cmask, H, W, rng
-            )
+            c_nuc, din_c, rmax_c, c_ctr, c_axes = nucHELPER1_generate_nucleolus_mask(cmask, H, W, rng)
 
-            #opt slightly smaller/more jittered bud nucleolus
             if rmax_c > 0 and c_nuc.any():
                 cy, cx = c_ctr
-                scaled = ellipse_mask_rot_jitter(
-                    H, W, (cy, cx),
-                    (c_axes[0] * 0.7, c_axes[1] * 0.7),#RETURN HERE
-                    angle_deg=np.float32(rng.uniform(0.0, 360.0)),
-                    jitter=0.3, noise_scale=32, repeat=True,
-                    seed=int(rng.integers(1 << 31)),
-                )
+                scaled = ellipse_mask_rot_jitter(H, W, (cy, cx),
+                                                 (c_axes[0]*0.7, c_axes[1]*0.7),
+                                                 angle_deg=np.float32(rng.uniform(0.0, 360.0)),
+                                                 jitter=0.3, noise_scale=32, repeat=True,
+                                                 seed=int(rng.integers(1 << 31)))
                 c_nuc = scaled & cmask
 
             nuc_child_stack[i] = c_nuc
 
-            c_base = F[i] * 0.8  #dimmer buds
+            c_base = np.float32(Fi * 0.8)  # scalar
             c_fluor, c_edges, c_nuc_edges, c_nuc_f = nucHELPER2_apply_fluor(
                 cmask, c_nuc, din_c, rmax_c, c_base, nuc_core_mul
             )
 
             coll_fluor_stack[i] += c_fluor
-            coll_edge_stack[i, c_edges] = c_base
-            coll_nuc_edge_stack[i, c_nuc_edges] = c_base
-            coll_nuc_mask_bool[i, c_nuc] = True
-            coll_nuc_mask_Fluor_list[i, c_nuc] = nuc_core_mul
-
+            coll_edge_stack[i,      c_edges]      = c_base
+            coll_nuc_edge_stack[i,  c_nuc_edges]  = c_base
+            coll_nuc_mask_bool[i,   c_nuc]        = True
+            coll_nuc_mask_Fluor_list[i, c_nuc]    = nuc_core_mul
         #gradient pass per-cell uses vectorized masks)
         if nuc_grad_amp != 0.0:
             #parent cyto gradient
