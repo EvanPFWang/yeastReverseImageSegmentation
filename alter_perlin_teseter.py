@@ -1,12 +1,16 @@
+from typing import Any
+
 import imageio
 import time
 import imageio.v2 as imageio  #imageio‑v3 friendly import
 import numpy as np
 from    noise   import  pnoise2
+from numpy import ndarray, dtype, float64
 from skimage.draw import ellipse
 from    scipy.signal import fftconvolve
 
 from    pathlib import  Path
+
 
 import psfmodels    as psfm
 from scipy.ndimage import distance_transform_edt,   center_of_mass, gaussian_filter, sobel
@@ -208,27 +212,38 @@ def ellipse_mask_rot_jitter(h, w, center, axes, angle_deg: float,
 
 
 #small injector: optionally spawn a bud for each parent cell
-def _maybe_add_bud(parent_mask, parent_center, parent_axes, *,
+def _maybe_add_bud(parent_mask_bool, parent_center, parent_axes,parent_angle, *,
                    rng, prob=0.4):
     """
     With probability `prob`, generate a bud mask and merge *outside*
     the parent.  Returns merged_mask.
     """
+    idx =   np.argmax(np.bincount(parent_mask_bool[parent_mask_bool != 0]))
+    h, w = parent_mask_bool.shape
+    child = np.zeros((h,w))
+    #child bud info - idx,    (cell_id, (semi_a, semi_b), (center_x, center_y), angle)
     if rng.random() > prob:
-        return parent_mask  #leave as‑is
-
+        return parent_mask_bool, ((idx, parent_axes, parent_center, parent_angle),(None, (None,None), (None,None), None)),child.astype(bool)  #leave as‑is
+    #find the most common non-zero value
     bud_center, bud_axes, bud_rot = add_bud_random_rotation(
         parent_center, parent_axes, rng=rng
     )
-    h, w = parent_mask.shape
     bud_mask = ellipse_mask_rot_jitter(h, w, bud_center, bud_axes,
                                        bud_rot, jitter=0.05,
-                                       noise_scale=96, seed=rng.integers(1<<31))
+                                       noise_scale=79, seed=rng.integers(1<<31))
     #keep only protruding cap
-    bud_only = bud_mask & ~parent_mask
-    return parent_mask | bud_only
+    bud_only = bud_mask & ~parent_mask_bool
+    return parent_mask_bool | bud_only, (idx,bud_axes, bud_center, bud_rot), bud_mask#bud_mask alr bool
 
-
+"""def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
+    if rng.random() > prob:
+        return parent_mask
+    b_cen, b_axes, b_rot = add_bud_random_rotation(parent_center,
+                                                   parent_axes, rng=rng)
+    bud = ellipse_mask_rot_jitter(*parent_mask.shape, b_cen, b_axes, b_rot,
+                                  jitter=0.54, noise_scale=70,
+                                  seed=rng.integers(1<<31))
+    return parent_mask |    bud"""
 """
 mask_bool = create_ellipse_mask_vectorized_perturbed(
                 128, 256, coeffs,
@@ -239,7 +254,17 @@ mask_bool = create_ellipse_mask_vectorized_perturbed(
 labels[mask_bool] = cell_id"""
 
 
-
+"""metadata: Dict[str, Any] = {
+        "width": dimensions[0],
+        "height": dimensions[1],
+        "dtype": "uint8",
+        "unique_labels": np.unique(uint8_labels).tolist(),
+        "max_label": int(uint8_labels.max()),
+        "offset": offset,
+        "fluorescence": metadata["fluorescence"],
+        "rotation": metadata["rotation"],
+    }
+"""
 def render_fluor_image(label_map: np.ndarray,
                        metadata: dict,
                        *,
@@ -261,7 +286,7 @@ def render_fluor_image(label_map: np.ndarray,
                        #---------- GRAD NOISE ---------
                        grad_dark_amp: float = 0,#-0.08,
                        #---------- RANGE --------------
-                       peak_fraction: float = 0.4,  coll_mask_map):
+                       peak_fraction: float = 0.4,  coll_mask_map,child_info, coll_bud_only_mask_map):
     """
     Flexible yeast‑fluorescence renderer.
 
@@ -280,8 +305,9 @@ def render_fluor_image(label_map: np.ndarray,
                         safe_stack.min(axis=0),  #pixel‑wise min over N
                         0.0).astype(np.float32)"""
     #
-    #fluorescence per cell
+    #baseline fluorescence per cell
     fluors = np.asarray(metadata["fluorescence"], dtype=np.float32)
+    angle_parent_rots   =   np.asarray(metadata["rotation"], dtype=np.float32)
     fluors_norm = fluors / (fluors.max() + 1e-6)  #(N,)
     F = fluors_norm[:, None, None]
     coll_fluor_stack = np.zeros((N, h, w), dtype=np.float32)
@@ -290,13 +316,12 @@ def render_fluor_image(label_map: np.ndarray,
     coll_nuc_mask_bool     = np.zeros((N, h, w), dtype=bool)
     coll_nuc_mask_Fluor_list = np.zeros((N, h, w), dtype=np.float32)
     coll_nuc_edge_stack = np.zeros((N, h, w), dtype=np.float32)
-
+    #coll_nuc_mask_bool, coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
     for idx, mask in enumerate(masks_bool):
         if not mask.any():
             continue
-        din = distance_transform_edt(mask)  #(h, w) float32
-        r_max = din[mask].max()
-
+        din = distance_transform_edt(mask)  #distance of each point from the background (h, w) float32
+        r_max = din[mask].max()#max distance of each point from the background
         #nucleolus mask
         cy, cx = center_of_mass(mask)
         a_nuc = rng.uniform(0.5, 0.84) * r_max
@@ -307,9 +332,14 @@ def render_fluor_image(label_map: np.ndarray,
             jitter=0.4, noise_scale=48,
             repeat=True, seed=rng.integers(1 << 31),
         )
+        #coll_nuc_mask_bool, coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
+        #   nuc_mask_in_cell
+        """nuc_m"""# from_mask(mask, (din,r_max)), dims(h,w), (idx, CoM(parent_cy,parent_cx), (a_parent, b_parent), parent_rot)
+        #   mask yields din,r_max
         nuc_mask_in_cell = nuc_m & mask
         coll_nuc_mask_bool[idx, nuc_mask_in_cell] = True
 
+        #give nucleolus
 
 
         # 3) cytoplasm shading -------------------------------------------
@@ -328,13 +358,18 @@ def render_fluor_image(label_map: np.ndarray,
         coll_nuc_edge_stack[idx, nuc_edges] = F[idx]
         coll_nuc_mask_Fluor_list[idx, nuc_mask_in_cell] = nuc_core_mul
 
+        #coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
+        """nuc_m"""# from_mask(mask, (din,r_max)), dims(h,w), (idx, CoM(parent_cy,parent_cx), (a_parent, b_parent), parent_rot)
+        #   mask yields din,r_max,         edges = edge_mask_np(mask)
+        #   F yields base, cyto
+        """coll_fluor_stack""" #((din,r_max),(base, cyto)_, nuc_core_mul
 
     #nucleolus gradient CYTOPLASM ONLY
     if nuc_grad_amp != 0.0:
         decay = np.empty_like(coll_fluor_stack, dtype=np.float32)
         for idx in range(N):
-            d = distance_transform_edt(~coll_nuc_mask_bool[idx])
-            decay[idx] = np.exp(-(d / (nuc_decay_px + 1e-6)) ** 2)
+            d_outside_nuc = distance_transform_edt(~coll_nuc_mask_bool[idx])
+            decay[idx] = np.exp(-(d_outside_nuc / (nuc_decay_px + 1e-6)) ** 2)
         mult      = 1.0 + nuc_grad_amp * decay
         cytoplasm = masks_bool & ~coll_nuc_mask_bool
         coll_fluor_stack[cytoplasm] *= mult[cytoplasm]
@@ -426,7 +461,7 @@ GAMMA     = 0.7
 BUD_PROB  = 0.7           #always add a bud for demo
 NUCL_RATimage0 = 0.3          #inner dark ellipse as % of mother radius
 
-def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
+"""def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
     if rng.random() > prob:
         return parent_mask
     b_cen, b_axes, b_rot = add_bud_random_rotation(parent_center,
@@ -434,9 +469,9 @@ def _maybe_add_bud(parent_mask, parent_center, parent_axes, *, rng, prob):
     bud = ellipse_mask_rot_jitter(*parent_mask.shape, b_cen, b_axes, b_rot,
                                   jitter=0.54, noise_scale=70,
                                   seed=rng.integers(1<<31))
-    return parent_mask |    bud
+    return parent_mask |    bud"""
 
-def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.6):
+def generate_uint8_labels_with_buds(w: object, h: object, cells_data: object, *, rng: object, bud_prob: object = 0.6) -> tuple[ndarray[tuple[int, int], dtype[float64]] | ndarray[tuple[int, int], Any] | ndarray[tuple[int, int], dtype[Any]] | ndarray[tuple[Any, ...], dtype[float64]] | ndarray[Any, Any] | ndarray[tuple[Any, ...], dtype[Any]], ndarray[tuple[int, int, int], dtype[float64]] | ndarray[tuple[int, int, int], Any] | ndarray[tuple[int, int, int], dtype[Any]] | ndarray[tuple[Any, ...], dtype[float64]] | ndarray[Any, Any] | ndarray[tuple[Any, ...], dtype[Any]], Any, ndarray[tuple[int, int, int], dtype[float64]] | ndarray[tuple[int, int, int], Any] | ndarray[tuple[int, int, int], dtype[Any]] | ndarray[tuple[Any, ...], dtype[float64]] | ndarray[Any, Any] | ndarray[tuple[Any, ...], dtype[Any]]]:
     global _H, _W
     rng = rng or np.random.default_rng()
     canvas_shape = (_H, _W)
@@ -451,7 +486,8 @@ def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.6):
 
     N, H, W = len(indices), *canvas_shape
     coll_labels = np.zeros((N, H, W), dtype=np.uint8)
-
+    coll_bud_only_labels = np.zeros((N, H, W), dtype=np.uint8)
+    #otherwise All zeroes
     for idx,    (cell_id, (semi_a, semi_b), (center_x, center_y), angle) \
             in enumerate(zip(indices, shapes,    locations, rotations)):
         if cell_id > 255:
@@ -462,16 +498,18 @@ def generate_uint8_labels_with_buds(w, h, cells_data, *, rng, bud_prob=0.6):
         coeffs = ellipse_params_to_general_form(center_x, center_y, semi_a, semi_b, angle)
         parent = create_ellipse_mask_vectorized_perturbed2(
             w, h, coeffs, 0.7, 39, (row_off, col_off)
-        )
-        parent = _maybe_add_bud(parent, (center_y + row_off, col_off + center_x), (semi_a, semi_b),
+        )#parent mask is bool
+        #child and parent_with_child mask is bool
+        parent_with_child, child_info,child = _maybe_add_bud(parent, (center_y + row_off, col_off + center_x), (semi_a, semi_b), angle,
                                 rng=rng, prob=BUD_PROB)
 
 #overlap = mask & (labels != 0)
 #ith_Label[parent]   =   cell_id
-        coll_labels[idx,parent] = cell_id
-        labels[parent] = cell_id
-    return labels,  coll_labels#, intersection
-
+        coll_labels[idx,parent_with_child] = cell_id
+        labels[parent_with_child] = cell_id
+        coll_bud_only_labels[idx,child] = cell_id
+    return labels,  coll_labels, child_info, coll_bud_only_labels #, intersection
+#child bud info - idx,    (cell_id, (semi_a, semi_b), (center_x, center_y), angle)
 
 def crop_box(img,dimensions,offset):
     """    Crop a TIFF to a box    """
@@ -512,7 +550,7 @@ if __name__ == "__main__":
     toy = {
             "indices":       list(range(1, 10)),
             "fluorescence":  [1900, 120, 800, 2500, 900, 1000, 1300, 1700, 950],
-            "size":          [15, 18, 14, 20, 16, 17, 19, 18, 15],
+            "size_var":          [15, 18, 14, 20, 16, 17, 19, 18, 15],
             "shape":         [(8, 19), (10, 13), (7, 6), (11, 7), (13, 8),
                                (9, 9), (11, 8), (45, 9), (18, 7)],
             "location":      [(30, 25), (30, 50), (40, 80), (60, 30),
@@ -521,8 +559,7 @@ if __name__ == "__main__":
         }
     row_offset,col_offset   = center_offset((2048, 2048), (h, w))
     base_file,  _           = os.path.split(os.path.abspath(__file__))
-    mask,   coll_mask_map                    = generate_uint8_labels_with_buds(w, h, toy, rng=rng,
-                                           bud_prob=BUD_PROB)
+    mask,   coll_mask_map, child_info,coll_bud_only_mask_map                    = generate_uint8_labels_with_buds(w, h, toy, rng=rng,  bud_prob=BUD_PROB)#info else (None,(None,None) ,(None,None) ,None)
     inspect_uint8_output(mask)
 
     coll_cropped_uint8_labels = np.stack(
@@ -559,7 +596,7 @@ if __name__ == "__main__":
 
 
     full_fluor = render_fluor_image(mask, image0_metadata,bitdepth=BITDEPTH,
-                                    gamma=GAMMA, rng=rng,coll_mask_map=coll_mask_map)
+                                    gamma=GAMMA, rng=rng,coll_mask_map=coll_mask_map,child_info=child_info, coll_bud_only_mask_map=coll_bud_only_mask_map)
     cropped_fluor = crop_box(full_fluor, (h, w), (row_offset, col_offset))
     imageio.imwrite("demo_fluor.tiff", cropped_fluor)                     #training
 
@@ -638,3 +675,4 @@ if __name__ == "__main__":
 
 
     plt.imshow(vis_rgb); plt.axis("off")
+    plt.show()

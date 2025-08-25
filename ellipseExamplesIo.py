@@ -125,6 +125,7 @@ def save_uint8_labels(uint8_labels: np.ndarray,dimensions,offset,
         "max_label": int(uint8_labels.max()),
         "offset": offset,
         "fluorescence": metadata["fluorescence"],
+        "rotation": metadata["rotation"],
     }
 
     #optionally surface aggregate fluorescence for convenience
