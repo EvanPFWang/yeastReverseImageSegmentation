@@ -256,7 +256,7 @@ def softplus_stable(x):
 def log1mexp(x):
     """
     log(1 - exp(x)) for x <= 0 computed stably.
-    Uses: if x < -log(2) -> log1p(-exp(x)); else -> log(-expm1(x)).
+    use if x < -log(2) -> log1p(-exp(x)); else -> log(-expm1(x))
     """
     x = _to_f64(x)
     cutoff = -np.log(2.0)
