@@ -253,6 +253,142 @@ mask_bool = create_ellipse_mask_vectorized_perturbed(
                 seed=42)             #reproducible masks
 labels[mask_bool] = cell_id"""
 
+#HELPERS for redner_fluor_image
+
+from scipy.ndimage import distance_transform_edt, center_of_mass, binary_erosion  #optional CuPy
+
+
+def nucHELPER1_generate_nucleolus_mask(mask, h, w, rng=None):
+    """
+    Vectorization-first nucleolus generator.
+    Returns:
+      nuc_mask_in_cell (bool HxW), din (float32 HxW), r_max (float32),
+      (cy, cx) (float32, float32), (a_nuc, b_nuc) (float32, float32)
+    """
+    if rng is None:
+        rng = np.random.default_rng()  #fast, broadcast-friendly API. 
+    #empty cell → fast exit (no loops)
+    if not np.any(mask):
+        return np.zeros((h, w), dtype=bool), np.zeros((h, w), dtype=np.float32), 0.0, (0.0, 0.0), (0.0, 0.0)
+
+    #EDT over whole mask (vectorized C kernel)
+    din = distance_transform_edt(mask).astype(np.float32, copy=False)  #exact Euclidean DT
+    r_max = np.float32(din[mask].max()) if np.any(mask) else 0.0
+    #guard against tiny negative due to dtype roundoff (paranoia)
+    if r_max < 0.0:
+        r_max = 0.0
+
+    #CoM(vectorized) ret floats in image coords
+    cy, cx = center_of_mass(mask)
+    cy = np.float32(cy);
+    cx = np.float32(cx)
+
+    #rand semi-axes relative to cell scale; generate once (no Python loops)
+    a_nuc = np.float32(rng.uniform(0.50, 0.84) * r_max)
+    b_nuc = np.float32(a_nuc * rng.uniform(0.30, 0.73))
+
+    #(expects a vectorized kernel on (H,W))
+    #NOTE:ellipse_mask_rot_jitter should alr vectorized; no pixel loops here
+    nuc_m = ellipse_mask_rot_jitter(
+        h, w, (cy, cx), (a_nuc, b_nuc),
+        angle_deg=np.float32(rng.uniform(0.0, 360.0)),
+        jitter=0.4, noise_scale=48,
+        repeat=True, seed=int(rng.integers(1 << 31)),
+    )
+
+    #keep nucleolus strictly inside cell
+    nuc_mask_in_cell = np.logical_and(nuc_m, mask)
+
+    return nuc_mask_in_cell, din, r_max, (cy, cx), (a_nuc, b_nuc)
+
+
+def nucHELPER2_apply_fluor(mask, nuc_mask_in_cell, din, r_max, base_fluor, nuc_core_mul=0.1):
+    """
+    Vectorized fluor shading and edge extraction.
+    Inputs:
+      mask, nuc_mask_in_cell: bool (H,W)
+      din: float32 (H,W) distance-to-background inside 'mask' (from helper 1)
+      r_max: float scalar
+      base_fluor: scalar or (1,1) array – broadcasts over (H,W)
+    Returns:
+      fluor_values (float32 HxW), cell_edges (bool HxW),
+      nuc_edges (bool HxW), nuc_fluor_values (float32 HxW)
+    """
+    #ensure float/broadcast semantics once, up-front
+    base = np.asarray(base_fluor, dtype=np.float32)  #shape () or (1,1) → broadcasts
+
+    #alloc outputs (contiguous, vectorized writes)
+    h, w = mask.shape
+    fluor_values = np.zeros((h, w), dtype=np.float32)
+    nuc_fluor_values = np.zeros((h, w), dtype=np.float32)
+
+    #cyto (mask \ nucleolus): bright-at-edge via 1 - din/r_max, fused with where()
+    if r_max > 0.0:
+        cyto = np.logical_and(mask, np.logical_not(nuc_mask_in_cell))
+        #comp ONLY once; write back masked (no Python loop)
+        denom = np.float32(max(r_max, 1e-6))
+        cyto_scale = 1.0 - (din / denom)
+        fluor_values[cyto] = (base * cyto_scale)[cyto]
+
+    #nucleolus darkening (single masked write)
+    if np.any(nuc_mask_in_cell):
+        fluor_values[nuc_mask_in_cell] = base * np.float32(nuc_core_mul)
+        nuc_fluor_values[nuc_mask_in_cell] = np.float32(nuc_core_mul)
+
+    #edges via 1-px erosion difference (pure morphology; vectorized)
+    #(mask & ~erode(mask)) gives outline without loops
+    cell_edges = np.logical_and(mask, np.logical_not(binary_erosion(mask)))
+    nuc_edges = np.logical_and(nuc_mask_in_cell, np.logical_not(binary_erosion(nuc_mask_in_cell)))
+    #alternative (thicker) edge: morphological_gradient(mask, size=3) > 0
+    return fluor_values, cell_edges, nuc_edges, nuc_fluor_values
+
+
+def nuCytoTransformerHelper_apply_gradient(fluor_stack, mask, nuc_mask, nuc_grad_amp=-2.0, nuc_decay_px=4.0):
+    """
+    Vectorized cytoplasm gradient from nucleolus outward, with an ROI crop
+    to minimize work. No Python loops.
+    Returns: modified_fluor (float32 HxW)
+    """
+    if nuc_grad_amp == 0.0 or not np.any(mask) or not np.any(nuc_mask):
+        return fluor_stack
+
+    #build tight ROI around cell region avoid full-frame EDT
+    union = np.logical_or(mask, nuc_mask)
+    ys, xs = np.nonzero(union)
+    if ys.size == 0:
+        return fluor_stack
+
+    pad = max(2, int(np.ceil(3.0 * np.float32(nuc_decay_px))))  #~3σ of Gaussian-like decay
+    y0 = max(0, int(ys.min() - pad));
+    y1 = min(fluor_stack.shape[0], int(ys.max() + 1 + pad))
+    x0 = max(0, int(xs.min() - pad));
+    x1 = min(fluor_stack.shape[1], int(xs.max() + 1 + pad))
+
+    #slice ROI views (no copies where possible)
+    fs_roi = fluor_stack[y0:y1, x0:x1]
+    mask_roi = mask[y0:y1, x0:x1]
+    nuc_roi = nuc_mask[y0:y1, x0:x1]
+
+    #EDT from nuc boundary outwards (exact Euclidean, vectorized)
+    d_out = distance_transform_edt(np.logical_not(nuc_roi)).astype(np.float32, copy=False)
+
+    #smooth, safe exp bounded decay; multiply only cytoplasm in ROI: denom guarded; exp argument <= 0, so no overflow
+    dec_denom = np.float32(max(np.float32(nuc_decay_px), 1e-6))
+    decay = np.exp(- (d_out / dec_denom) ** 2).astype(np.float32, copy=False)
+
+    mult = 1.0 + np.float32(nuc_grad_amp) * decay
+    #opt safety: prevent neg fluor (can happen if nuc_grad_amp << -1)
+    mult = np.maximum(mult, 0.0)
+
+    modified = fs_roi.copy()
+    cyto_roi = np.logical_and(mask_roi, np.logical_not(nuc_roi))
+    modified[cyto_roi] *= mult[cyto_roi]
+
+    #write back into original array slice
+    out = fluor_stack.copy()
+    out[y0:y1, x0:x1] = modified
+    return out
+
 
 """metadata: Dict[str, Any] = {
         "width": dimensions[0],
@@ -338,7 +474,7 @@ def render_fluor_image(label_map: np.ndarray,
 
         #coll_nuc_mask_bool, coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
         #   nuc_mask_in_cell
-        """nuc_m"""# from_mask(mask, (din,r_max)), dims(h,w), (idx, (a_parent, b_parent),CoM(parent_cy,parent_cx), parent_rot)
+        """nuc_m"""#from_mask(mask, (din,r_max)), dims(h,w), (idx, (a_parent, b_parent),CoM(parent_cy,parent_cx), parent_rot)
         #   mask yields din,r_max
         nuc_mask_in_cell = nuc_m & mask
         coll_nuc_mask_bool[idx, nuc_mask_in_cell] = True
@@ -347,7 +483,7 @@ def render_fluor_image(label_map: np.ndarray,
         #give nucleolus
 
 
-        # 3) cytoplasm shading -------------------------------------------
+        #3) cytoplasm shading -------------------------------------------
         #ALERT 2 STARTS HERE: nucHELPER2 gives coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
         base = F[idx]
         cyto = mask & ~nuc_m
@@ -365,7 +501,7 @@ def render_fluor_image(label_map: np.ndarray,
         coll_nuc_mask_Fluor_list[idx, nuc_mask_in_cell] = nuc_core_mul
 
         #coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
-        """nuc_m"""# from_mask(mask, (din,r_max)), dims(h,w), (idx, CoM(parent_cy,parent_cx), (a_parent, b_parent), parent_rot)
+        """nuc_m"""#from_mask(mask, (din,r_max)), dims(h,w), (idx, CoM(parent_cy,parent_cx), (a_parent, b_parent), parent_rot)
         #   mask yields din,r_max,         edges = edge_mask_np(mask)
         #   F yields base, cyto
         """coll_fluor_stack""" #((din,r_max),(base, cyto)_, nuc_core_mul
