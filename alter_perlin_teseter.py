@@ -69,7 +69,7 @@ rng_global = default_rng()
 #-------------------------------------------------------------------------
 #Helper 1 ─ choose where & how the bud attaches
 #-------------------------------------------------------------------------
-def add_bud_random_rotation(parent_center, parent_axes, *,
+def add_bud_random_rotation(parent_axes, parent_center, *,
                              bud_ratio: float = 0.6,
                              bud_offset: float = 0.15,
                              rng=rng_global):
@@ -212,7 +212,7 @@ def ellipse_mask_rot_jitter(h, w, center, axes, angle_deg: float,
 
 
 #small injector: optionally spawn a bud for each parent cell
-def _maybe_add_bud(parent_mask_bool, parent_center, parent_axes,parent_angle, *,
+def _maybe_add_bud(parent_mask_bool, parent_axes, parent_center,parent_angle, *,
                    rng, prob=0.4):
     """
     With probability `prob`, generate a bud mask and merge *outside*
@@ -226,7 +226,7 @@ def _maybe_add_bud(parent_mask_bool, parent_center, parent_axes,parent_angle, *,
         return parent_mask_bool, ((idx, parent_axes, parent_center, parent_angle),(None, (None,None), (None,None), None)),child.astype(bool)  #leave as‑is
     #find the most common non-zero value
     bud_center, bud_axes, bud_rot = add_bud_random_rotation(
-        parent_center, parent_axes, rng=rng
+        parent_axes, parent_center, rng=rng
     )
     bud_mask = ellipse_mask_rot_jitter(h, w, bud_center, bud_axes,
                                        bud_rot, jitter=0.05,
@@ -334,7 +334,7 @@ def render_fluor_image(label_map: np.ndarray,
         )
         #coll_nuc_mask_bool, coll_nuc_mask_Fluor_list, coll_nuc_edge_stack
         #   nuc_mask_in_cell
-        """nuc_m"""# from_mask(mask, (din,r_max)), dims(h,w), (idx, CoM(parent_cy,parent_cx), (a_parent, b_parent), parent_rot)
+        """nuc_m"""# from_mask(mask, (din,r_max)), dims(h,w), (idx, (a_parent, b_parent),CoM(parent_cy,parent_cx), parent_rot)
         #   mask yields din,r_max
         nuc_mask_in_cell = nuc_m & mask
         coll_nuc_mask_bool[idx, nuc_mask_in_cell] = True
@@ -500,7 +500,7 @@ def generate_uint8_labels_with_buds(w: object, h: object, cells_data: object, *,
             w, h, coeffs, 0.7, 39, (row_off, col_off)
         )#parent mask is bool
         #child and parent_with_child mask is bool
-        parent_with_child, child_info,child = _maybe_add_bud(parent, (center_y + row_off, col_off + center_x), (semi_a, semi_b), angle,
+        parent_with_child, child_info,child = _maybe_add_bud(parent, (semi_a, semi_b) , (center_y + row_off, col_off + center_x), angle,
                                 rng=rng, prob=BUD_PROB)
 
 #overlap = mask & (labels != 0)
@@ -559,7 +559,9 @@ if __name__ == "__main__":
         }
     row_offset,col_offset   = center_offset((2048, 2048), (h, w))
     base_file,  _           = os.path.split(os.path.abspath(__file__))
-    mask,   coll_mask_map, child_info,coll_bud_only_mask_map                    = generate_uint8_labels_with_buds(w, h, toy, rng=rng,  bud_prob=BUD_PROB)#info else (None,(None,None) ,(None,None) ,None)
+    mask,   coll_mask_map, child_info,coll_bud_only_mask_map        = generate_uint8_labels_with_buds(
+        w, h, toy, rng=rng,  bud_prob=BUD_PROB)
+        #info else (None,(None,None) ,(None,None) ,None)
     inspect_uint8_output(mask)
 
     coll_cropped_uint8_labels = np.stack(
@@ -596,7 +598,8 @@ if __name__ == "__main__":
 
 
     full_fluor = render_fluor_image(mask, image0_metadata,bitdepth=BITDEPTH,
-                                    gamma=GAMMA, rng=rng,coll_mask_map=coll_mask_map,child_info=child_info, coll_bud_only_mask_map=coll_bud_only_mask_map)
+                                    gamma=GAMMA, rng=rng,coll_mask_map=coll_mask_map,
+                                    child_info=child_info, coll_bud_only_mask_map=coll_bud_only_mask_map)
     cropped_fluor = crop_box(full_fluor, (h, w), (row_offset, col_offset))
     imageio.imwrite("demo_fluor.tiff", cropped_fluor)                     #training
 
