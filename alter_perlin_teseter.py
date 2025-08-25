@@ -8,12 +8,12 @@ from    noise   import  pnoise2
 from numpy import ndarray, dtype, float64
 from skimage.draw import ellipse
 from    scipy.signal import fftconvolve
-
+import error_minimization
 from    pathlib import  Path
 
 
 import psfmodels    as psfm
-from scipy.ndimage import distance_transform_edt,   center_of_mass, gaussian_filter, sobel
+from scipy.ndimage import distance_transform_edt,   center_of_mass, binary_erosion, gaussian_filter, sobel
 import os
 import cv2
 
