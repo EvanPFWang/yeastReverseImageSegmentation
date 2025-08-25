@@ -928,9 +928,13 @@ if __name__ == "__main__":
         coll_bud_only_mask_map: np.ndarray,
         *,
     """
-    full_fluor = render_fluor_image_modular_vec_v2(mask, image0_metadata,coll_mask_map=coll_mask_map,
-                                    child_info=child_info, coll_bud_only_mask_map=coll_bud_only_mask_map,
-                                                   bitdepth=BITDEPTH, gamma=GAMMA, rng=rng)
+    full_fluor, coll_nuc_mask_bool_pairs = render_fluor_image_modular_vec_v2(
+        mask, image0_metadata,
+        coll_mask_map=coll_mask_map,
+        child_info=child_info,
+        coll_bud_only_mask_map=coll_bud_only_mask_map,
+        rng=rng,
+    )
     cropped_fluor = crop_box(full_fluor, (h, w), (row_offset, col_offset))
     imageio.imwrite("demo_fluor.tiff", cropped_fluor)                     #training
 
